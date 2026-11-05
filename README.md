@@ -11,6 +11,17 @@ verification harness.
 
 ## Status
 
+**In-weights run started (2026-11-05, overnight):** the Doom circuit emitted locally
+(packed.pt, 55 layers, head_cols 227 — EXACT vs the repo emitter), and the LX machine's
+trace verified on GPU: ~4.4M tokens predicted across the night's runs with **zero wrong
+predictions**, including 2,064,385 in the final budget-capped run (checkpoint saved).
+`kaggle/` holds the runner (doomrun.py, fast16.py — fp32-precast GEMMs, two-GPU split,
+resume), `oracle/` the verification gate. T4-measured ceiling: ~1,030 tok/s (fla-bound);
+split across 2x T4 measured slower (866) — single GPU is the config. The boot (7.35M
+tokens) is 28% paid via `session.pt`; frames come at ~6.8 min each on a T4 after it
+finishes. Full ledger: the qwenputer repo's `doom-lx/ops/work/` + the overnight
+`DECISIONS.md`/`REPORT.md`.
+
 **Proven (2026-10-31):** the port boots and plays on the project's reference
 machine (`ref.py`) — the executable spec the in-weights circuit is verified
 against instruction-for-instruction. 60M instructions, zero faults: title
