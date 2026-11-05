@@ -1,0 +1,440 @@
+diff --git a/doomgeneric/d_main.c b/doomgeneric/d_main.c
+index 9012e5f..74efce8 100644
+--- a/doomgeneric/d_main.c
++++ b/doomgeneric/d_main.c
+@@ -184,7 +184,20 @@ void D_Display (void)
+ 
+     if (nodrawers)
+     	return;                    // for comparative timing / profiling
+-		
++
++#if defined(LF_EVERY) && LF_EVERY > 1
++    // Render every LF_EVERY tics: the game keeps simulating at the full 35 tics/s
++    // rate, so a rendered frame advances game time by LF_EVERY tics and a 10 fps
++    // clip shows real-time play while paying for one render out of LF_EVERY. Only
++    // the in-level drawers are gated; the frame counter lives in I_FinishUpdate,
++    // which is skipped too, so dump numbering counts rendered frames.
++    {
++        static unsigned int qwen_skip;
++        if (gamestate == GS_LEVEL && gametic && qwen_skip++ % LF_EVERY)
++            return;
++    }
++#endif
++
+     redrawsbar = false;
+     
+     // change the view size if needed
+@@ -196,6 +209,11 @@ void D_Display (void)
+     }
+ 
+     // save the current screen if about to wipe
++#ifdef LF_NO_WIPE
++    // The melt is a transition effect: it draws no gameplay pixels but costs about a tenth of
++    // the machine's boot instructions, and on this machine instructions are the budget.
++    wipe = false;
++#else
+     if (gamestate != wipegamestate)
+ 		{
+ 		wipe = true;
+@@ -203,6 +221,7 @@ void D_Display (void)
+     }
+     else
+     	wipe = false;
++#endif
+ 
+     if (gamestate == GS_LEVEL && gametic)
+     	HU_Erase();
+@@ -215,12 +234,12 @@ void D_Display (void)
+ 			break;
+ 		if (automapactive)
+ 			AM_Drawer ();
+-		if (wipe || (viewheight != 200 && fullscreen) )
++		if (wipe || (viewheight != SCREENHEIGHT && fullscreen) )
+ 			redrawsbar = true;
+ 		if (inhelpscreensstate && !inhelpscreens)
+ 			redrawsbar = true;              // just put away the help screen
+-		ST_Drawer (viewheight == 200, redrawsbar );
+-		fullscreen = viewheight == 200;
++		ST_Drawer (viewheight == SCREENHEIGHT, redrawsbar );
++		fullscreen = viewheight == SCREENHEIGHT;
+ 		break;
+ 
+       case GS_INTERMISSION:
+@@ -1359,6 +1378,19 @@ void D_DoomMain (void)
+     D_BindVariables();
+     M_LoadDefaults();
+ 
++#if defined(DG_DETAILLEVEL) || defined(DG_SCREENBLOCKS)
++    // M_LoadDefaults binds these to the config table and overwrites the compiled-in values, so
++    // -DDG_DETAILLEVEL / -DDG_SCREENBLOCKS had no effect at all (four builds with different
++    // values ran instruction for instruction identically). Force them after the config load.
++#ifdef DG_DETAILLEVEL
++    detailLevel = DG_DETAILLEVEL;
++#endif
++#ifdef DG_SCREENBLOCKS
++    screenblocks = DG_SCREENBLOCKS;
++#endif
++    DEH_printf("dg: detailLevel %d, screenblocks %d\n", detailLevel, screenblocks);
++#endif
++
+     // Save configuration at exit.
+     I_AtExit(M_SaveDefaults, false);
+ 
+diff --git a/doomgeneric/d_net.c b/doomgeneric/d_net.c
+index b8962cc..851807f 100644
+--- a/doomgeneric/d_net.c
++++ b/doomgeneric/d_net.c
+@@ -201,7 +201,12 @@ static void InitConnectData(net_connect_data_t *connect_data)
+ 
+     // Read checksums of our WAD directory and dehacked information
+ 
++#ifdef LF_NO_WADSUM
++    // One player, one WAD: the directory SHA1 exists to reject mismatched netgames.
++    memset(connect_data->wad_sha1sum, 0, sizeof(connect_data->wad_sha1sum));
++#else
+     W_Checksum(connect_data->wad_sha1sum);
++#endif
+ 
+ #if ORIGCODE
+     DEH_Checksum(connect_data->deh_sha1sum);
+diff --git a/doomgeneric/i_video.c b/doomgeneric/i_video.c
+index 84bebde..d5e778e 100644
+--- a/doomgeneric/i_video.c
++++ b/doomgeneric/i_video.c
+@@ -289,6 +289,13 @@ void I_InitGraphics (void)
+     /* Allocate screen to draw to */
+ 	I_VideoBuffer = (byte*)Z_Malloc (SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);  // For DOOM to draw on
+ 
++#ifdef DG_SCREEN_IS_VIDEOBUFFER
++    /* Port change for the in-weights machines: there is no display memory separate from the
++       engine's render buffer, so point the screen at it and I_FinishUpdate skips its blit.
++       The blit was ~60% of a frame's instructions (64000 byte stores per frame). */
++    DG_ScreenBuffer = I_VideoBuffer;
++#endif
++
+ 	screenvisible = true;
+ 
+     extern void I_InitInput(void);
+@@ -337,6 +344,11 @@ void I_FinishUpdate (void)
+     line_in  = (unsigned char *) I_VideoBuffer;
+     line_out = (unsigned char *) DG_ScreenBuffer;
+ 
++#ifdef DG_SCREEN_IS_VIDEOBUFFER
++    if (line_in == line_out)  /* the screen is the render buffer: nothing to copy */
++        goto drawn;
++#endif
++
+     y = SCREENHEIGHT;
+ 
+     while (y--)
+@@ -366,6 +378,9 @@ void I_FinishUpdate (void)
+         line_in += SCREENWIDTH;
+     }
+ 
++#ifdef DG_SCREEN_IS_VIDEOBUFFER
++drawn:
++#endif
+ 	DG_DrawFrame();
+ }
+ 
+diff --git a/doomgeneric/i_video.h b/doomgeneric/i_video.h
+index c8565f4..cec22bb 100644
+--- a/doomgeneric/i_video.h
++++ b/doomgeneric/i_video.h
+@@ -23,9 +23,21 @@
+ #include "doomtype.h"
+ 
+ // Screen width and height.
++//
++// Port change for the in-weights machines: the renderer's resolution and the display buffer are
++// the same thing here, and a frame's instruction cost is dominated by the pixels drawn, so both
++// are compile-time settable. DG_RESX/DG_RESY also fix the display buffer to match, which keeps
++// fb_scaling at 1 and the blit out of the way.
++
++#ifndef DG_SCREENWIDTH
++#define DG_SCREENWIDTH 320
++#endif
++#ifndef DG_SCREENHEIGHT
++#define DG_SCREENHEIGHT 200
++#endif
+ 
+-#define SCREENWIDTH  320
+-#define SCREENHEIGHT 200
++#define SCREENWIDTH  DG_SCREENWIDTH
++#define SCREENHEIGHT DG_SCREENHEIGHT
+ 
+ // Screen width used for "squash" scale functions
+ 
+diff --git a/doomgeneric/m_menu.c b/doomgeneric/m_menu.c
+index 6df9655..0990e36 100644
+--- a/doomgeneric/m_menu.c
++++ b/doomgeneric/m_menu.c
+@@ -74,8 +74,20 @@ int			showMessages = 1;
+ 	
+ 
+ // Blocky mode, has default, 0 = high, 1 = normal
+-int			detailLevel = 0;
+-int			screenblocks = 10;
++//
++// Port change for the in-weights machines: the renderer cost per frame is dominated by the
++// columns and spans it draws, and both are compile-time settable here so a run can trade
++// picture quality for instruction budget. detailLevel 1 doubles the pixel size (half the
++// columns drawn); screenblocks shrinks the 3D viewport (setblocks * 32 columns).
++#ifndef DG_DETAILLEVEL
++#define DG_DETAILLEVEL 0
++#endif
++#ifndef DG_SCREENBLOCKS
++#define DG_SCREENBLOCKS 10
++#endif
++
++int			detailLevel = DG_DETAILLEVEL;
++int			screenblocks = DG_SCREENBLOCKS;
+ 
+ // temp for screenblocks (0-9)
+ int			screenSize;
+diff --git a/doomgeneric/r_main.c b/doomgeneric/r_main.c
+index 22278fe..d4e2c85 100644
+--- a/doomgeneric/r_main.c
++++ b/doomgeneric/r_main.c
+@@ -575,10 +575,13 @@ void R_InitTextureMapping (void)
+     // Scan viewangletox[] to generate xtoviewangle[]:
+     //  xtoviewangle will give the smallest view angle
+     //  that maps to x.	
++    //  viewangletox[] is non-increasing in i, so the index this looks for only advances as x
++    //  grows: restarting it at 0 for every column made the loop O(FINEANGLES*viewwidth), which
++    //  was 12% of this machine's entire boot.
++    i = 0;
+     for (x=0;x<=viewwidth;x++)
+     {
+-	i = 0;
+-	while (viewangletox[i]>x)
++	while (i < FINEANGLES/2 - 1 && viewangletox[i]>x)
+ 	    i++;
+ 	xtoviewangle[x] = (i<<ANGLETOFINESHIFT)-ANG90;
+     }
+@@ -586,9 +589,6 @@ void R_InitTextureMapping (void)
+     // Take out the fencepost cases from viewangletox.
+     for (i=0 ; i<FINEANGLES/2 ; i++)
+     {
+-	t = FixedMul (finetangent[i], focallength);
+-	t = centerx - t;
+-	
+ 	if (viewangletox[i] == -1)
+ 	    viewangletox[i] = 0;
+ 	else if (viewangletox[i] == viewwidth+1)
+diff --git a/doomgeneric/r_things.c b/doomgeneric/r_things.c
+index 74e7369..b8d4f2e 100644
+--- a/doomgeneric/r_things.c
++++ b/doomgeneric/r_things.c
+@@ -178,6 +178,10 @@ void R_InitSpriteDefs (char** namelist)
+     int		start;
+     int		end;
+     int		patched;
++    unsigned int spritenamekey;
++    int		*idx;
++    int		bucketbeg[26], bucketcnt[26];
++    int		nbucket, k;
+ 		
+     // count the number of sprite names
+     check = namelist;
+@@ -193,6 +197,42 @@ void R_InitSpriteDefs (char** namelist)
+ 	
+     start = firstspritelump-1;
+     end = lastspritelump+1;
++
++    // Bucket the sprite lumps by the first letter of their name. The scan below then walks only
++    // the lumps that can possibly match a given sprite instead of all ~2000 of them, which took
++    // 19% of this machine's boot.
++    nbucket = end - start - 1;
++    idx = nbucket > 0 ? Z_Malloc(nbucket * sizeof(int), PU_STATIC, NULL) : NULL;
++    memset(bucketcnt, 0, sizeof(bucketcnt));
++    if (idx != NULL)
++    {
++	int cursor[26];
++	unsigned char c;
++
++	for (l=start+1 ; l<end ; l++)
++	{
++	    c = lumpinfo[l].name[0];
++	    if (c >= 'a' && c <= 'z')
++		c -= 'a' - 'A';
++	    if (c >= 'A' && c <= 'Z')
++		bucketcnt[c - 'A']++;
++	}
++	nbucket = 0;
++	for (k=0 ; k<26 ; k++)
++	{
++	    bucketbeg[k] = nbucket;
++	    cursor[k] = nbucket;
++	    nbucket += bucketcnt[k];
++	}
++	for (l=start+1 ; l<end ; l++)
++	{
++	    c = lumpinfo[l].name[0];
++	    if (c >= 'a' && c <= 'z')
++		c -= 'a' - 'A';
++	    if (c >= 'A' && c <= 'Z')
++		idx[cursor[c - 'A']++] = l;
++	}
++    }
+ 	
+     // scan all the lump names for each of the names,
+     //  noting the highest frame letter.
+@@ -206,9 +246,26 @@ void R_InitSpriteDefs (char** namelist)
+ 	
+ 	// scan the lumps,
+ 	//  filling in the frames for whatever is found
+-	for (l=start+1 ; l<end ; l++)
++	spritename = DEH_String(namelist[i]);
++	spritenamekey = (unsigned int) W_LumpNameKey(spritename);
+ 	{
+-	    if (!strncasecmp(lumpinfo[l].name, spritename, 4))
++	unsigned char c0 = spritename[0];
++	int b, lo, hi;
++
++	if (c0 >= 'a' && c0 <= 'z')
++	    c0 -= 'a' - 'A';
++	b = (idx != NULL && c0 >= 'A' && c0 <= 'Z') ? c0 - 'A' : -1;
++	lo = b >= 0 ? bucketbeg[b] : 0;
++	hi = b >= 0 ? bucketbeg[b] + bucketcnt[b] : 0;
++	if (b < 0)
++	{
++	    lo = start + 1;
++	    hi = end;
++	}
++	for (k=lo ; k<hi ; k++)
++	{
++	    l = idx != NULL && b >= 0 ? idx[k] : k;
++	    if ((unsigned int) W_LumpKeyOf(l) == spritenamekey)
+ 	    {
+ 		frame = lumpinfo[l].name[4] - 'A';
+ 		rotation = lumpinfo[l].name[5] - '0';
+@@ -228,6 +285,7 @@ void R_InitSpriteDefs (char** namelist)
+ 		}
+ 	    }
+ 	}
++	}
+ 	
+ 	// check the frames that were found for completeness
+ 	if (maxframe == -1)
+diff --git a/doomgeneric/w_wad.c b/doomgeneric/w_wad.c
+index 1248046..16d111e 100644
+--- a/doomgeneric/w_wad.c
++++ b/doomgeneric/w_wad.c
+@@ -64,9 +64,31 @@ unsigned int numlumps = 0;
+ // Hash table for fast lookups
+ 
+ static lumpinfo_t **lumphash;
++static unsigned long long *lumpkey;   // W_LumpNameKey of each lump, built with the hash table
+ 
+ // Hash function used for lump names.
+ 
++// Case-folded 8-byte key for a lump name. Lump names are ASCII and at most 8 characters, NUL
++// padded, so a folded 64-bit word compares them exactly like strncasecmp(name, other, 8) -- and
++// on this machine an integer compare is ~60x cheaper than the call into strncasecmp/toupper.
++unsigned long long W_LumpNameKey(const char *s)
++{
++    unsigned long long k = 0;
++
++    for (unsigned int i = 0; i < 8; ++i)
++    {
++        unsigned char c = (unsigned char) s[i];
++
++        if (c == '\0')
++            break;
++        if (c >= 'a' && c <= 'z')
++            c -= 'a' - 'A';
++        k |= (unsigned long long) c << (8 * i);
++    }
++
++    return k;
++}
++
+ unsigned int W_LumpNameHash(const char *s)
+ {
+     // This is the djb2 string hash function, modded to work on strings
+@@ -77,7 +99,11 @@ unsigned int W_LumpNameHash(const char *s)
+ 
+     for (i=0; i < 8 && s[i] != '\0'; ++i)
+     {
+-        result = ((result << 5) ^ result ) ^ toupper((int)s[i]);
++        unsigned char c = (unsigned char) s[i];
++
++        if (c >= 'a' && c <= 'z')
++            c -= 'a' - 'A';
++        result = ((result << 5) ^ result ) ^ c;
+     }
+ 
+     return result;
+@@ -246,6 +272,16 @@ int W_NumLumps (void)
+     return numlumps;
+ }
+ 
++// The key of a lump already in the directory, precomputed by W_GenerateHashTable. Falls back to
++// hashing the name when the table does not exist yet.
++unsigned long long W_LumpKeyOf (int lump)
++{
++    if (lumpkey != NULL && (unsigned int) lump < numlumps)
++        return lumpkey[lump];
++
++    return W_LumpNameKey(lumpinfo[lump].name);
++}
++
+ 
+ 
+ //
+@@ -257,6 +293,7 @@ int W_CheckNumForName (char* name)
+ {
+     lumpinfo_t *lump_p;
+     int i;
++    unsigned long long key;
+ 
+     // Do we have a hash table yet?
+ 
+@@ -267,10 +304,11 @@ int W_CheckNumForName (char* name)
+         // We do! Excellent.
+ 
+         hash = W_LumpNameHash(name) % numlumps;
++        key = W_LumpNameKey(name);
+         
+         for (lump_p = lumphash[hash]; lump_p != NULL; lump_p = lump_p->next)
+         {
+-            if (!strncasecmp(lump_p->name, name, 8))
++            if (lumpkey[lump_p - lumpinfo] == key)
+             {
+                 return lump_p - lumpinfo;
+             }
+@@ -553,11 +591,17 @@ void W_GenerateHashTable(void)
+         lumphash = Z_Malloc(sizeof(lumpinfo_t *) * numlumps, PU_STATIC, NULL);
+         memset(lumphash, 0, sizeof(lumpinfo_t *) * numlumps);
+ 
++        // Precomputed name keys, so a lookup compares one word per bucket entry.
++        if (lumpkey != NULL)
++            Z_Free(lumpkey);
++        lumpkey = Z_Malloc(sizeof(unsigned long long) * numlumps, PU_STATIC, NULL);
++
+         for (i=0; i<numlumps; ++i)
+         {
+             unsigned int hash;
+ 
+             hash = W_LumpNameHash(lumpinfo[i].name) % numlumps;
++            lumpkey[i] = W_LumpNameKey(lumpinfo[i].name);
+ 
+             // Hook into the hash table
+ 
+diff --git a/doomgeneric/w_wad.h b/doomgeneric/w_wad.h
+index 7189574..f006caf 100644
+--- a/doomgeneric/w_wad.h
++++ b/doomgeneric/w_wad.h
+@@ -60,6 +60,11 @@ wad_file_t *W_AddFile (char *filename);
+ int	W_CheckNumForName (char* name);
+ int	W_GetNumForName (char* name);
+ 
++// Case-folded lump name keys: comparing two of these replaces strncasecmp on names, which on a
++// machine that pays per instruction is the difference between 32% of the boot and 5%.
++unsigned long long W_LumpNameKey (const char *name);
++unsigned long long W_LumpKeyOf (int lump);
++
+ int	W_LumpLength (unsigned int lump);
+ void    W_ReadLump (unsigned int lump, void *dest);
+ 

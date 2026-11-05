@@ -72,3 +72,23 @@ int mkdir(const char *path, mode_t mode)
     (void)path; (void)mode;
     return -1;
 }
+
+// No process model on the machine. doomgeneric's only fork/exec use is the
+// zenity error box in i_system.c; picolibc's system() pulls these in, so they
+// must exist and fail cleanly.
+int fork(void)
+{
+    return -1;
+}
+
+int waitpid(int pid, int *status, int options)
+{
+    (void)pid; (void)status; (void)options;
+    return -1;
+}
+
+int execve(const char *path, char *const argv[], char *const envp[])
+{
+    (void)path; (void)argv; (void)envp;
+    return -1;
+}

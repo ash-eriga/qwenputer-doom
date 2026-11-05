@@ -221,9 +221,20 @@ int main(void)
         "-iwad", "DOOM.WAD",
         "-nosound",
         "-nomusic",
+#ifdef LF_WARP
+        // The LX build starts straight into a level: the menus cost ~200 frames of the guest and
+        // their outcome depends on how fast ENTER taps arrive, so a scripted playthrough is only
+        // reproducible without them.
+        "-warp", "1", LF_MAP,
+        "-skill", LF_SKILL,
+#endif
         NULL,
     };
-    doomgeneric_Create(5, argv);
+    // doomgeneric_Create takes argc, and anything past it is ignored -- count the array instead of
+    // hardcoding the number, or the extra arguments are silently dropped.
+    int argc = 0;
+    while (argv[argc]) argc++;
+    doomgeneric_Create(argc, argv);
     for (;;)
         doomgeneric_Tick();
     return 0;

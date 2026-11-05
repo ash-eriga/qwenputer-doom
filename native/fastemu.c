@@ -201,6 +201,7 @@ static void predecode(void) {
 static uint8_t palette[768];
 static int have_palette;
 static uint32_t fb_addr = 0xCA3A8, fc_addr = 0xD9DB8;
+static int fb_is_ptr;   /* --fbp: fb_addr holds a pointer to the framebuffer, not the buffer */
 static uint32_t key_addr = 0xD9DB4, demo_addr;   // demo_addr 0 = not poked
 static volatile uint8_t *ctrl;                  // mmap'd control file, 8 B
 static int resx = 320, resy = 200;
@@ -247,7 +248,14 @@ static void put32be(uint8_t *p, uint32_t v) {
 
 static int write_png(const char *path) {
     int w = resx, h = resy;
-    const uint8_t *fb = mem + fb_addr;
+    /* --fb may name a pointer variable (the engine allocates its screen at runtime): follow
+       it, so a build whose framebuffer moves still dumps the frame it drew. */
+    uint32_t base = fb_addr;
+    if (fb_is_ptr) {
+        base = rd32(mem + fb_addr);
+        if (!base || base + (uint32_t)(w * h) > MEM_SIZE) return -1;
+    }
+    const uint8_t *fb = mem + base;
     uint8_t *raw = malloc(h * (1 + 3 * w));
     for (int y = 0; y < h; y++) {
         uint8_t *row = raw + y * (1 + 3 * w);
@@ -302,8 +310,13 @@ static int write_png(const char *path) {
 static int write_ppm(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
+    uint32_t base = fb_addr;
+    if (fb_is_ptr) {
+        base = rd32(mem + fb_addr);
+        if (!base || base + (uint32_t)(resx * resy) > MEM_SIZE) { fclose(f); return -1; }
+    }
     fprintf(f, "P6\n%d %d\n255\n", resx, resy);
-    const uint8_t *fb = mem + fb_addr;
+    const uint8_t *fb = mem + base;
     uint8_t *row = malloc(3 * resx);
     for (int y = 0; y < resy; y++) {
         for (int x = 0; x < resx; x++)
@@ -578,6 +591,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--live") && i + 1 < argc) live_path = argv[++i];
         else if (!strcmp(a, "--guest-out") && i + 1 < argc) guest_out = argv[++i];
         else if (!strcmp(a, "--fb") && i + 1 < argc) fb_addr = strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--fbp") && i + 1 < argc) {
+            fb_addr = strtoul(argv[++i], NULL, 0);
+            fb_is_ptr = 1;
+        }
         else if (!strcmp(a, "--fc") && i + 1 < argc) fc_addr = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--keys") && i + 1 < argc) key_addr = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--demo") && i + 1 < argc) demo_addr = strtoul(argv[++i], NULL, 0);

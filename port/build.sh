@@ -11,8 +11,8 @@ MAP=${1:-big}
 OUT=$ROOT/build/$MAP
 mkdir -p "$OUT"
 
-PICO=/usr/lib/picolibc/riscv64-unknown-elf
-GCC=riscv64-unknown-elf-gcc
+PICO=${PICO:-/usr/lib/picolibc/riscv64-unknown-elf}
+GCC=${GCC:-riscv64-unknown-elf-gcc}
 MARCH=rv32im_zba
 LIBC=$(find "$PICO/lib" -path '*rv32im/ilp32/libc.a' | head -1)
 LIBGCC=$($GCC -march=rv32im -mabi=ilp32 -print-libgcc-file-name)
@@ -21,8 +21,8 @@ echo "libc: $LIBC"
 if [ "$MAP" = stock ]; then LD=$RVENV/rom.ld; else LD=$HERE/qwenputer-big.ld; fi
 
 CFLAGS="-march=$MARCH -mabi=ilp32 -Os -DNORMALUNIX -DCMAP256 \
--DDOOMGENERIC_RESX=${RESX:-320} -DDOOMGENERIC_RESY=${RESY:-200} \
--isystem $PICO/include -I$HERE -I$DG -I$RVENV -Wno-unused-parameter -Wno-unused-variable"
+-DDOOMGENERIC_RESX=${RESX:-320} -DDOOMGENERIC_RESY=${RESY:-200} -DDG_SCREENWIDTH=${RESX:-320} -DDG_SCREENHEIGHT=${RESY:-200} -DDG_DETAILLEVEL=${DETAIL:-0} -DDG_SCREENBLOCKS=${BLOCKS:-10} -DQWEN_ZONE_BYTES=${ZONE:-524288} \
+-isystem $PICO/include -I$HERE -I$DG -I$RVENV -Wno-unused-parameter -Wno-unused-variable -DDG_SCREEN_IS_VIDEOBUFFER"
 
 # doomgeneric sources (from its Makefile.soso list), minus the soso platform,
 # minus w_file_stdc (replaced by the DROM WAD class), minus i_system
