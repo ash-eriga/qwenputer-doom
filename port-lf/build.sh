@@ -12,7 +12,7 @@
 #     (cd ../doomgeneric && git apply ../port-lf/doomgeneric-lf.patch)
 #
 # Without it the game still builds and runs; it just costs ~19.6M instructions of startup
-# instead of ~4.6M. See work/STATE.md sections 2 and 3.
+# instead of ~4.6M.
 #
 # Knobs: OPT (default s; 2 is cheaper per frame for the same image), DETAIL, BLOCKS, ZONE, MAP,
 # SKILL. TEXT_END in doom-lf.ld must stay 0x40000 to match the packed circuit.

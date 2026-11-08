@@ -9,8 +9,8 @@ semantics as `lx.ref.Machine`) playing this build with the E1M5 key schedule.
   (FRAMESKIP=3, OPT=2 MAP=5 DETAIL=1 BLOCKS=3, .text 247,380 <= TEXT_END 0x40000).
 - `frame-*.png` — a human-viewable sample (every 10th frame; the PPMs are the bytes that count).
 
-Regenerate (the toolchain that built the ELFs is in `../tools/bin`, Debian gcc-riscv64
-14.2 + picolibc 1.8.9; see the overnight BUILD-REPORT):
+Regenerate (the ELFs were built with Debian gcc-riscv64
+14.2 + picolibc 1.8.9):
 
     cc -O3 -o build/fastemu-lf native/fastemu-lf.c -lm
     ./build/fastemu-lf build/doom-lf-s3.elf --wad build/doom1.wad \
@@ -21,6 +21,5 @@ Regenerate (the toolchain that built the ELFs is in `../tools/bin`, Debian gcc-r
       --dump-dir build/oracle-frames --guest-out none
     md5sum build/oracle-frames/frame-*.ppm   # must match frames.md5
 
-The repo's older `frames/frame-0060.png` / STATE.md md5s came from a build tree that no longer
-exists (that build tree's exact key schedule is unrecoverable), so they are superseded:
-an in-weights frame is genuine iff it matches THIS oracle byte for byte.
+The repo's older `frames/frame-0060.png` came from a build tree that no longer exists, so it is
+superseded: an in-weights frame is genuine iff it matches THIS oracle byte for byte.
