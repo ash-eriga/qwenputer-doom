@@ -35,7 +35,32 @@ volatile unsigned int qwen_key_state = 0;
 // the looping patrol) drives; 0 = the demo lets go — keys it was holding
 // are released, script events already due are drained so they never fire
 // late — and only qwen_key_state (a human at the controls) is read.
+#ifdef QWEN_SCHEDULE_TABLE
+volatile unsigned int qwen_demo_enabled = 0;  // the baked schedule drives from frame 0
+#else
 volatile unsigned int qwen_demo_enabled = 1;
+#endif
+
+#ifdef QWEN_SCHEDULE_TABLE
+// The in-weights build: the schedule is baked into the guest (one entry per mask change,
+// {0,0} terminates), applied by the guest itself — no host input exists after GO. The
+// runner-poke rule is reproduced exactly: when the frame counter reads N, the mask becomes
+// the last entry with frame <= N, so the next DG_GetKey (the next frame's input) sees it.
+typedef struct { unsigned int frame; unsigned int mask; } qwen_mask_event_t;
+static const qwen_mask_event_t qwen_schedule[] = {
+#include "qwen_schedule.inc"
+};
+static unsigned int qwen_sched_pos = 0;
+
+static void qwen_apply_schedule(void)
+{
+    while (qwen_schedule[qwen_sched_pos].frame &&
+           qwen_frame_count + 1 >= qwen_schedule[qwen_sched_pos].frame)
+        qwen_key_state = qwen_schedule[qwen_sched_pos++].mask;
+}
+#else
+static void qwen_apply_schedule(void) {}
+#endif
 
 void DG_Init(void)
 {
@@ -64,6 +89,9 @@ void DG_SleepMs(uint32_t ms)
 void DG_DrawFrame(void)
 {
     qwen_frame_count++;
+#ifdef QWEN_SCHEDULE_TABLE
+    qwen_apply_schedule();  // exactly the runner's poke point: the counter's store
+#endif
     qwen_ticks_ms += 1000 / 35;
 }
 
@@ -137,6 +165,7 @@ static int demo_event(int *pressed, unsigned char *key,
 
 int DG_GetKey(int *pressed, unsigned char *key)
 {
+    qwen_apply_schedule();
     if (!qwen_demo_enabled)
     {
         // Demo off: release anything the demo was holding, one key per

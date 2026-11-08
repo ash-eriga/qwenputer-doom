@@ -12,7 +12,7 @@
 #     (cd ../doomgeneric && git apply ../port-lf/doomgeneric-lf.patch)
 #
 # Without it the game still builds and runs; it just costs ~19.6M instructions of startup
-# instead of ~4.6M.
+# instead of ~4.6M. See work/STATE.md sections 2 and 3.
 #
 # Knobs: OPT (default s; 2 is cheaper per frame for the same image), DETAIL, BLOCKS, ZONE, MAP,
 # SKILL. TEXT_END in doom-lf.ld must stay 0x40000 to match the packed circuit.
@@ -52,6 +52,7 @@ CFLAGS="-march=$MARCH -mabi=ilp32 -O${OPT:-s} -DNORMALUNIX -DCMAP256 \
 -Wno-unused-parameter -Wno-unused-variable -DDG_SCREEN_IS_VIDEOBUFFER \
 -DDG_DETAILLEVEL=$DETAIL -DDG_SCREENBLOCKS=$BLOCKS -DQWEN_ZONE_BYTES=$ZONE \
 -DLF_WARP -DLF_MAP=\"$MAP\" -DLF_SKILL=\"$SKILL\" -DLF_NO_WIPE -DLF_NO_WADSUM -DLF_EVERY=$FRAMESKIP \
+${EXTRA_CFLAGS:-} \
 -ffunction-sections -fdata-sections"
 
 # doomgeneric sources (from its Makefile.soso list), minus the soso platform, minus w_file_stdc
