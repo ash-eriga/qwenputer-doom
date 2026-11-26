@@ -10,17 +10,44 @@ Interval: frames 5→20 inclusive boundary deltas (15 rendered-frame intervals).
 | guest | resolution/fidelity | instr/frame | exact LX tokens/frame | tokens/instr |
 |---|---|---:|---:|---:|
 | `build/doom-lf.elf` local DoomGeneric build | 192x120, real Doom renderer/game | 614,807 | 968,034 | 1.575 |
-| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 3,570 | 4,298 | 1.204 |
+| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 1,376 | 1,663 | 1.208 |
 
 Reduction in this interval:
 
-- **172.2× fewer instructions/frame**
-- **225.2× fewer exact LX tokens/frame**
+- **446.7× fewer instructions/frame**
+- **582.1× fewer exact LX tokens/frame**
 
 Twenty output seconds at 10 fps (200 frames) at the measured steady rate:
 
 - DoomGeneric local build: **~193.6M tokens**
-- assembly cost probe: **~0.86M tokens**
+- assembly cost probe: **~0.33M tokens**
+
+## Ray sharing and delta drawing
+
+The previous probe (d84769f) marched one ray per column and redrew all 96 columns every frame:
+3,570 instructions and 4,298 tokens/frame in the interval above. Four changes, all keeping the
+displayed pixels identical:
+
+- columns with the same camera offset cast the same ray, so 43 marches serve 96 columns;
+- the kernel of a ray group compares the pattern id stored in the group's hidden stride word with
+  its own and returns early when they match (74% of groups between consecutive autopilot frames);
+- a frame whose position and angle did not change is skipped whole;
+- marches and kernels share one section, so every hit branch is a direct `bne` instead of an
+  assembler-relaxed `beqz` + `j`.
+
+Exact `lx.ref.Machine` tokens per frame, frames 2..N (frame 1 draws everything and is listed
+separately):
+
+| run | before avg | before max | after avg | after max | after frame 1 |
+|---|---:|---:|---:|---:|---:|
+| baked autopilot, 400 frames | 2,980 | 5,031 | 486 | 2,765 | 3,280 |
+| `demo-20s.sched`, 250 frames | 2,955 | 5,297 | 464 | 2,760 | 3,255 |
+| `verify/scenarios/random-keys.sched`, 400 frames | 3,785 | 5,474 | 1,162 | 2,934 | 3,255 |
+
+The worst steady frame (all groups change, mostly while turning) is 2,934 tokens, 1.87× below
+the old worst frame. `verify/reference_frames.json` holds the row-major frame hashes of the old
+renderer for every verification scenario plus 400/300-frame random-key runs; the suite requires
+the new build to reproduce all of them.
 
 ## Circuit size lever: small memory
 
@@ -33,9 +60,12 @@ token is much cheaper to execute.
 
 Combined first-order effect before executor-specific optimizations:
 
-- ~225.2× fewer tokens/frame;
+- ~582.1× fewer tokens/frame;
 - ~3.93× fewer layers/work per token;
-- **~885× less transformer work per output frame**.
+- **~2,287× less transformer work per output frame**.
+
+The renderer changes above keep `TEXT_END=0x2000` and `RAM_SIZE=0x8000`, so the circuit, and
+an already emitted `packed.pt`, are unchanged: the weights depend only on that configuration.
 
 This is an architectural reduction in circuit size, not a throughput measurement. GPU tok/s
 must still be measured after emission.
@@ -116,7 +146,10 @@ delta/15: instructions=614,807/frame tokens=968,034/frame
 Assembly cumulative CSV frame 5→20:
 
 ```text
-frame 5:  instructions=20,569    tokens=25,178
-frame 20: instructions=74,114    tokens=89,648
-delta/15: instructions=3,570/frame tokens=4,298/frame
+frame 5:  instructions=8,775     tokens=10,670
+frame 20: instructions=29,419    tokens=35,616
+delta/15: instructions=1,376/frame tokens=1,663/frame
 ```
+
+The same interval for the per-column renderer at d84769f was 3,570 instructions and 4,298
+tokens/frame.

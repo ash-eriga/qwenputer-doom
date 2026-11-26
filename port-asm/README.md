@@ -8,8 +8,13 @@ Tricks used:
 
 - RV32IM assembly only; no libc, no boot, no Doom startup cost.
 - 96x60 framebuffer in column-major order, so vertical spans are contiguous memory.
-- exactly 16 aligned `sw` writes per column; generated straight-line column kernels, selected
-  by distance, replace span loops.
+- 15 aligned `sw` writes per column; generated straight-line column kernels, one per distinct
+  pixel pattern, replace span loops.
+- columns that share a camera angle share one ray: 43 marches for 96 columns.
+- each ray group remembers the pattern it last drew in its hidden stride word and skips the
+  kernel when the pattern is unchanged; a frame whose position and angle are unchanged is
+  skipped whole. Every displayed pixel stays identical to the per-column renderer
+  (`verify/reference_frames.json`).
 - no division in the frame loop; projection comes from generated tables/code.
 - packed 4.4 fixed-point X/Y ray state: one `add` advances both axes.
 - expanded `map256`, indexed directly by packed tile bits.
@@ -31,13 +36,13 @@ Outputs:
 - `build/asm-ray0-small.elf` — same cost build linked into a 32 KiB LX image (`TEXT_END=8 KiB`), reducing the circuit shape from 55 layers to 14 layers
 
 Current local measurement on the baked autopilot (`measure_exact_lx.py`, exact `lx.ref.Machine`
-token stream, full-step build, 20 frames):
+token stream, full-step build, 20 frames, first frame included):
 
 ```text
-instr/frame=9966.4
-tokens/frame=11661.0
-tokens/instr=1.170
-20s_at_10fps_tokens=2332210
+instr/frame=1471.0
+tokens/frame=1780.8
+tokens/instr=1.211
+20s_at_10fps_tokens=356160
 ```
 
 The fastemu visual build is only for debugging: its linear transpose is intentionally excluded

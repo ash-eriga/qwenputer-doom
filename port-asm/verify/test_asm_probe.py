@@ -2,6 +2,7 @@
 """Strong deterministic verification for the assembly-native LX renderer."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import struct
@@ -31,11 +32,22 @@ from lx_harness import (  # noqa: E402
 )
 
 BASELINE_PATH = VERIFY_DIR / 'baselines.json'
+REFERENCE_PATH = VERIFY_DIR / 'reference_frames.json'
 COST_BUILDS = ('full', 'half')
+KERNEL_SYMBOL = re.compile(r'colkern_(\d+)_(\d+)$')
 
 
 def load_baselines() -> dict[str, object]:
     return json.loads(BASELINE_PATH.read_text())
+
+
+def load_reference() -> dict[str, object]:
+    return json.loads(REFERENCE_PATH.read_text())
+
+
+def kernel_widths(symbols) -> list[int]:
+    """Width (columns written) of every generated column kernel in the ELF."""
+    return [int(m.group(1)) for name in symbols if (m := KERNEL_SYMBOL.match(name))]
 
 
 class AsmProbeVerification(unittest.TestCase):
@@ -123,13 +135,15 @@ class AsmProbeVerification(unittest.TestCase):
                 scan = scan_executable_instructions(path)
                 self.assertEqual(scan['division_sites'], [])
                 self.assertEqual(scan['invalid_sites'], [])
-                self.assertGreater(scan['zero_words'], 0, 'expected generated fixed-stride kernel padding')
                 counts = scan['counts']
                 self.assertNotIn('atomic', counts)
                 self.assertNotIn('system-or-csr', counts)
                 self.assertNotIn('floating-point', counts)
-                self.assertEqual(counts.get('sw', 0), 15 * 64 + 1,
-                                 '64 generated kernels * 15 SW plus the frame-count commit')
+                widths = kernel_widths(inspect_elf(path)['symbols'])
+                self.assertTrue(widths, 'no generated column kernels found')
+                self.assertEqual(counts.get('sw', 0), sum(15 * w + 1 for w in widths) + 1,
+                                 'each kernel: 15 SW per column plus its pattern marker; '
+                                 'plus the frame-count commit')
 
     def test_exact_lx_tokens_and_instructions_per_frame_match_reference(self):
         for name in scenario_definitions():
@@ -156,6 +170,24 @@ class AsmProbeVerification(unittest.TestCase):
                          [f['fb_cols_sha256'] for f in b.per_frame])
         self.assertEqual([f['exact_tokens'] for f in a.per_frame],
                          [f['exact_tokens'] for f in b.per_frame])
+
+    def test_frames_match_the_per_column_ray_march_reference(self):
+        # reference_frames.json was captured from the renderer that marched one ray per column
+        # and redrew every column every frame.  Ray sharing, pattern skipping and frame skipping
+        # must leave every displayed pixel identical.
+        ref = load_reference()
+        for name in scenario_definitions():
+            with self.subTest(scenario=name):
+                run = self.scenario(name)
+                self.assertEqual(ref['scenarios'][name],
+                                 [f['fb_rowmajor_sha256'] for f in run.per_frame])
+        for name, spec in ref['long_runs'].items():
+            with self.subTest(long_run=name):
+                run = run_exact(ROOT / spec['elf'], spec['frames'], ROOT / spec['script'])
+                chain = ''.join(f['fb_rowmajor_sha256'] for f in run.per_frame)
+                self.assertEqual(spec['chain_sha256'], hashlib.sha256(chain.encode()).hexdigest())
+                self.assertGreater(len({f['fb_rowmajor_sha256'] for f in run.per_frame}), 100,
+                                   'the random-key run should visit many distinct views')
 
     def test_cost_regressions_exact_and_bounded(self):
         baselines = load_baselines()['scenarios']
@@ -186,10 +218,15 @@ class AsmProbeVerification(unittest.TestCase):
                 self.assertNotIn('divu', counts)
                 self.assertNotIn('rem', counts)
                 self.assertNotIn('remu', counts)
-                # 15 aligned SW per column * 96 columns plus the frame-count commit per frame.
-                self.assertEqual(counts.get('sw', 0), 4 * (15 * 96 + 1))
                 self.assertNotIn('sb', counts)
                 self.assertNotIn('sh', counts)
+
+                # The first frame finds no pattern marker, so it must draw every column: 15
+                # aligned SW per column, one marker SW for each of the 43 ray groups (distinct
+                # camera angles), and the frame commit.
+                first = run_exact(ROOT / 'build' / f'asm-ray0-{kind}.elf', 1)
+                first_counts = mnemonic_counts(first.machine, hot_only=True)
+                self.assertEqual(first_counts.get('sw', 0), 15 * 96 + 43 + 1)
 
         # Positive control: the visual/debug build intentionally transposes with SB.  If the
         # detector does not fire here, the negative checks above would be vacuous.

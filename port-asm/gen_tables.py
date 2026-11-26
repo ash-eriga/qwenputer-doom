@@ -18,7 +18,7 @@ GRID = 16
 SUB = 4                 # quarter-tile units; keeps the direct position table at 4 KiB
 XSUBS = GRID * SUB      # linear packed row stride: xsub + ysub*64
 POSTAB_SIZE = XSUBS * XSUBS
-KSTRIDE = 64            # fifteen aligned SW plus one jump, exactly 16 instructions
+FB_STRIDE = 64          # bytes per framebuffer column: 60 visible pixels + one hidden word
 CASES = 64
 
 ap = argparse.ArgumentParser()
@@ -144,9 +144,8 @@ for i in range(0, NTAB, 16):
     lines.append('    .half ' + ','.join(map(str, cos_vals[i:i + 16])))
 
 # Camera angle offsets are pre-doubled byte offsets into raydelta_tab, biased by +64 so the
-# ray loop can use angle+offset directly without a modulo/mask instruction.  Each offset lives
-# in byte 60 of its framebuffer column: the stride padding is immutable because kernels write
-# only bytes 0..59, so the framebuffer pointer doubles as the camera-table pointer.
+# ray loop can use angle+offset directly without a modulo/mask instruction.  They become load
+# immediates in the generated per-group code.
 fov_units = 256 * 60 / 360
 cam = [64 + 2 * round((x / (W - 1) - 0.5) * fov_units) for x in range(W)]
 
@@ -195,29 +194,24 @@ lines += ['    .align 2', '    .globl render_words', 'render_words:']
 for v in color_words:
     lines.append(f'    .word 0x{repword(v):08x}')
 
-# Initialize the four hidden stride bytes of every column.  Byte 60 is the immutable biased
-# camera offset; the other three stay zero so all 16 framebuffer words have defined contents.
-lines += ['    .section .data', '    .align 4', '    .globl fb_cols', 'fb_cols:']
-for v in cam:
-    lines += ['    .zero 60', f'    .byte {v}', '    .zero 3']
+# Every framebuffer word starts at zero.  At run time the hidden stride word (bytes 60..63) of
+# the first column of each ray group holds the id of the column pattern that group last drew.
+lines += ['    .section .data', '    .align 4', '    .globl fb_cols', 'fb_cols:',
+          f'    .zero {W * FB_STRIDE}']
 
 out = HERE / f'tables-{args.suffix}.S'
 out.write_text('\n'.join(lines) + '\n')
 
-# Column kernels: exactly fifteen aligned SW instructions cover the visible 60 scanlines
-# (four pixels per word).  The old sixteenth store only wrote hidden stride padding.  Group
-# color is chosen at the center of each four-scanline group; wall groups sample the extracted
-# texture vertically, so distant columns still use the true quantized STARTAN3/BROWN colors.
-kernel = ['# generated column kernels',
-          f'# source: {world["source"]}',
-          '    .section .text',
-          '    .align 4',
-          '    .globl colkern_base',
-          'colkern_base:',
-          '    .space 64']
+# A column pattern is the fifteen colour registers of one fixed-distance column: fifteen
+# aligned SW cover the visible 60 scanlines (four pixels per word).  Group colour is chosen at
+# the centre of each four-scanline group; wall groups sample the extracted texture vertically,
+# so distant columns still use the true quantized STARTAN3/BROWN colours.  Distances that give
+# the same pixels share one pattern id, which also lets the delta check skip them.
 texregs = ['a3', 't3', 't4', 't5', 't6']
 tx = world.get('texture_tx', 0)
-for steps in range(1, CASES + 1):
+
+
+def column_colors(steps):
     hh = h[steps]
     top = (H - hh) // 2
     colors = []
@@ -228,32 +222,83 @@ for steps in range(1, CASES + 1):
         elif y < top + hh:
             v = (y - top) / max(hh, 1)
             ty = min(127, int(v * 128))
-            cls = world['class_at'](tx, ty)
-            colors.append(texregs[cls])
+            colors.append(texregs[world['class_at'](tx, ty)])
         else:
             colors.append('a4')
-    assert len(colors) == 15
-    kernel.append(f'    .globl colkern_{steps}')
-    kernel.append(f'colkern_{steps}:')
-    for i, reg in enumerate(colors):
-        kernel.append(f'    sw {reg},{4 * i}(s4)')
-    kernel.append('    j colkern_done')
-    assert 16 * 4 == KSTRIDE
+    return tuple(colors)
+
+
+pattern_ids = {}
+pattern_of = [0] * (CASES + 1)
+for steps in range(1, CASES + 1):
+    pattern_of[steps] = pattern_ids.setdefault(column_colors(steps), len(pattern_ids) + 1)
+patterns = {pid: colors for colors, pid in pattern_ids.items()}
+
+# Columns whose camera offsets are equal cast the same ray, so each run of equal offsets is one
+# ray group: one march, one delta check and one kernel that writes all of its columns.
+groups = []  # [first column, width, biased camera byte offset]
+for x, v in enumerate(cam):
+    if groups and groups[-1][2] == v:
+        groups[-1][1] += 1
+    else:
+        groups.append([x, 1, v])
+widths = sorted({w for _x, w, _v in groups})
+assert max(widths) * FB_STRIDE <= 2047
+
+kernel = ['# generated renderer: ray groups, unrolled marches and column kernels',
+          f'# source: {world["source"]}',
+          f'# {len(groups)} ray groups for {W} columns, {len(patterns)} column patterns',
+          '    .section .text',
+          '    .align 2',
+          '    .globl render_groups',
+          'render_groups:']
+# s4 is the first column of the group, s7 the player's biased raydelta_tab address.
+for i, (_x, w, v) in enumerate(groups):
+    kernel += [f'    lh s6,{v}(s7)', f'    jal ra,march_{w}']
+    if i + 1 < len(groups):
+        kernel.append(f'    addi s4,s4,{FB_STRIDE * w}')
+kernel += ['    j render_done',
+           '    .globl colkern_done',
+           'colkern_done:',
+           '    ret',
+           '    .globl colkern_base',
+           'colkern_base:']
+
+
+def kernel_lines(w, pid):
+    out = [f'    .globl colkern_{w}_{pid}', f'colkern_{w}_{pid}:',
+           f'    lw t1,{H}(s4)',
+           f'    li t2,{pid}',
+           '    beq t1,t2,colkern_done',
+           f'    sw t2,{H}(s4)']
+    for c in range(w):
+        for i, reg in enumerate(patterns[pid]):
+            out.append(f'    sw {reg},{FB_STRIDE * c + 4 * i}(s4)')
+    out.append('    ret')
+    return out
+
+
+# Every probe branches straight to its pattern's kernel.  The march sits between the two halves
+# of its kernels so every target stays inside the +-4 KiB conditional-branch range; an
+# out-of-range branch would be relaxed into a branch plus a jump, one more token per ray.
+for w in widths:
+    pids = sorted(patterns)
+    half = (len(pids) + 1) // 2
+    for pid in pids[:half]:
+        kernel += kernel_lines(w, pid)
+    kernel += [f'    .globl march_{w}', f'march_{w}:',
+               '    add s5,s8,s6',
+               '    lbu s10,0(s5)',
+               f'    bne s10,zero,colkern_{w}_{pattern_of[1]}']
+    for steps in range(2, CASES + 1):
+        kernel += ['    add s5,s5,s6',
+                   '    lbu s10,0(s5)',
+                   f'    bne s10,zero,colkern_{w}_{pattern_of[steps]}']
+    kernel.append(f'    j colkern_{w}_{pattern_of[CASES]}')
+    for pid in pids[half:]:
+        kernel += kernel_lines(w, pid)
 
 kout = HERE / f'kernels-{args.suffix}.S'
 kout.write_text('\n'.join(kernel) + '\n')
-
-# Fully unroll the 64 ray probes.  Every probe branches straight to its fixed-distance kernel,
-# so the guest pays no group counter, distance arithmetic, or indirect dispatch in the hot loop.
-march = ['# generated unrolled ray march',
-         '    add s5,s8,s6',
-         '    lbu s10,0(s5)',
-         '    bne s10,zero,colkern_1']
-for steps in range(2, CASES + 1):
-    march += ['    add s5,s5,s6',
-              '    lbu s10,0(s5)',
-              f'    bne s10,zero,colkern_{steps}']
-march.append('    j colkern_64')
-(HERE / 'march.S').write_text('\n'.join(march) + '\n')
 print(out)
 print(kout)

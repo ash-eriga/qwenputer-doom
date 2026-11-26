@@ -5,14 +5,15 @@
 #   * aligned SW only in the framebuffer hot path
 #   * ray state is one linear postab address; one ADD advances both axes
 #   * solid window edges make that single-ADD update safe without bounds checks
-#   * column drawing is a generated straight-line kernel per distance: 15 SW, no loop
+#   * columns sharing a camera angle share one ray (43 rays for 96 columns)
+#   * column drawing is a generated straight-line kernel per pixel pattern: 15 SW per column,
+#     skipped when the group already shows that pattern; an unmoved frame is skipped whole
 #
 # Keys match fastemu-lf: bit 0 up, 1 down, 2 left, 3 right.
 
     .equ W, 96
     .equ H, 60
     .equ STRIDE, 64
-    .equ GROUPS, 16              # 16 groups * 4 probes = 64 ray steps
 
 #ifndef VISUAL
 #define VISUAL 0
@@ -31,8 +32,6 @@ _start:
     la tp, cos_tab
     la s11, map
     la a5, fb_cols
-    la a6, fb_cols
-    addi a6, a6, -64            # framebuffer end sentinel
     la a7, postab
     la a1, raydelta_tab
     .option pop
@@ -134,25 +133,25 @@ have_input:
 5:
 
     # ------------------------------------------------------------ render one frame
-    slli s7, s2, 1              # player angle as a byte offset into raydelta_tab
-    add s7, s7, a1              # biased table needs no per-column modulo/mask
     slli s8, s1, 6
     add s8, s8, s0
     add s8, s8, a7              # postab address of the player position
-    la s4, fb_cols + 6080       # framebuffer column 95; walk backwards
-column_loop:
-    # ray angle = player angle + camera offset[x], both pre-doubled byte offsets.
-    lb t0, 60(s4)               # immutable camera offset in hidden stride padding
-    add t0, t0, s7
-    lh s6, 0(t0)                # combined dxsub + dysub*64
+    # The frame is a pure function of (position, angle) and the framebuffer persists, so a
+    # frame with neither changed is already on screen.
+    bne s8, a0, 6f
+    beq s2, s3, render_done
+6:
+    mv a0, s8
+    mv s3, s2
+    slli s7, s2, 1              # player angle as a byte offset into raydelta_tab
+    add s7, s7, a1              # biased table needs no per-column modulo/mask
+    mv s4, a5                   # first column of the first ray group
+    # Generated code: one march per ray group (columns sharing a camera angle), each probe
+    # branching straight to a fixed-pattern kernel that skips groups whose pattern is unchanged.
+    j render_groups
 
-    # Generated unrolled probes branch directly to fixed-distance column kernels.
-#include "march.S"
-
-    .globl colkern_done
-colkern_done:
-    addi s4, s4, -64
-    bne s4, a6, column_loop
+    .globl render_done
+render_done:
 
 #if VISUAL
     # Debug/visual builds only: transpose the column-major frame into the linear buffer
