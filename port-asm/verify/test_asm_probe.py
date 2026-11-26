@@ -226,8 +226,8 @@ class AsmProbeVerification(unittest.TestCase):
         raw, linear = framebuffer_bytes(run.machine.ram, run.symbols)
         self.assertEqual(len(raw), FB_COLS_SIZE)
         self.assertEqual(len(linear), 96 * 60)
-        # The generated kernels write all 16 aligned words of every column, including the four
-        # stride-padding rows.  A completely black/zero framebuffer or a missing render would
+        # The generated kernels write the 15 visible aligned words of every column; the hidden
+        # stride word carries immutable camera metadata.  A black/missing render would
         # make these hashes trivially unstable across frames; require nonzero structure instead.
         self.assertGreaterEqual(len(set(raw)), 3, 'framebuffer should contain multiple palette indices')
         self.assertNotEqual(run.per_frame[0]['fb_cols_sha256'], run.per_frame[-1]['fb_cols_sha256'],

@@ -37,7 +37,8 @@ _start:
     la tp, cos_tab
     la s11, map
     la a5, fb_cols
-    la a6, camoff_tab
+    la a6, fb_cols
+    addi a6, a6, -64            # framebuffer end sentinel
     la a7, postab
     la a0, colkern_base + 4160   # one past the maximum-distance kernel case
     la a1, raydelta_tab
@@ -145,12 +146,10 @@ have_input:
     slli s8, s1, 6
     add s8, s8, s0
     add s8, s8, a7              # postab address of the player position
-    la s4, fb_cols + 6080       # framebuffer column 95; walk backwards with the camera table
-    addi s3, a6, 95             # camera offset pointer for column 95
-    addi t2, a6, -1             # end sentinel
+    la s4, fb_cols + 6080       # framebuffer column 95; walk backwards
 column_loop:
     # ray angle = player angle + camera offset[x], both pre-doubled byte offsets.
-    lb t0, 0(s3)
+    lb t0, 60(s4)               # immutable camera offset in hidden stride padding
     add t0, t0, s7
     lh s6, 0(t0)                # combined dxsub + dysub*64
     li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
@@ -189,8 +188,7 @@ hit3:
     .globl colkern_done
 colkern_done:
     addi s4, s4, -64
-    addi s3, s3, -1
-    bne s3, t2, column_loop
+    bne s4, a6, column_loop
 
 #if VISUAL
     # Debug/visual builds only: transpose the column-major frame into the linear buffer
@@ -228,10 +226,6 @@ vis_y_loop:
 
     .section .bss
     .align 4
-    .globl fb_cols
-fb_cols:
-    .skip W * STRIDE
-
     .globl fb_linear
 fb_linear:
     .skip W * H

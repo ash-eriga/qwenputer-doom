@@ -144,12 +144,11 @@ for i in range(0, NTAB, 16):
     lines.append('    .half ' + ','.join(map(str, cos_vals[i:i + 16])))
 
 # Camera angle offsets are pre-doubled byte offsets into raydelta_tab, biased by +64 so the
-# ray loop can use angle+offset directly without a modulo/mask instruction.
-lines += ['    .globl camoff_tab', 'camoff_tab:']
+# ray loop can use angle+offset directly without a modulo/mask instruction.  Each offset lives
+# in byte 60 of its framebuffer column: the stride padding is immutable because kernels write
+# only bytes 0..59, so the framebuffer pointer doubles as the camera-table pointer.
 fov_units = 256 * 60 / 360
 cam = [64 + 2 * round((x / (W - 1) - 0.5) * fov_units) for x in range(W)]
-for i in range(0, W, 16):
-    lines.append('    .byte ' + ','.join(map(str, cam[i:i + 16])))
 
 lines += ['    .align 1', '    .globl raydelta_tab', 'raydelta_tab:']
 base_delta = [(cos_vals[i] >> args.ray_shift) + ((sin_vals[i] >> args.ray_shift) << 6)
@@ -195,6 +194,12 @@ color_words = [world['ceil'], world['floor']] + world['reps']
 lines += ['    .align 2', '    .globl render_words', 'render_words:']
 for v in color_words:
     lines.append(f'    .word 0x{repword(v):08x}')
+
+# Initialize the four hidden stride bytes of every column.  Byte 60 is the immutable biased
+# camera offset; the other three stay zero so all 16 framebuffer words have defined contents.
+lines += ['    .section .data', '    .align 4', '    .globl fb_cols', 'fb_cols:']
+for v in cam:
+    lines += ['    .zero 60', f'    .byte {v}', '    .zero 3']
 
 out = HERE / f'tables-{args.suffix}.S'
 out.write_text('\n'.join(lines) + '\n')
