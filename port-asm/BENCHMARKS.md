@@ -10,17 +10,17 @@ Interval: frames 5→20 inclusive boundary deltas (15 rendered-frame intervals).
 | guest | resolution/fidelity | instr/frame | exact LX tokens/frame | tokens/instr |
 |---|---|---:|---:|---:|
 | `build/doom-lf.elf` local DoomGeneric build | 192x120, real Doom renderer/game | 614,807 | 968,034 | 1.575 |
-| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 4,509 | 5,538 | 1.228 |
+| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 4,318 | 5,345 | 1.238 |
 
 Reduction in this interval:
 
-- **136.3× fewer instructions/frame**
-- **174.8× fewer exact LX tokens/frame**
+- **142.4× fewer instructions/frame**
+- **181.1× fewer exact LX tokens/frame**
 
 Twenty output seconds at 10 fps (200 frames) at the measured steady rate:
 
 - DoomGeneric local build: **~193.6M tokens**
-- assembly cost probe: **~1.11M tokens**
+- assembly cost probe: **~1.07M tokens**
 
 ## Circuit size lever: small memory
 
@@ -33,9 +33,9 @@ token is much cheaper to execute.
 
 Combined first-order effect before executor-specific optimizations:
 
-- ~174.8× fewer tokens/frame;
+- ~181.1× fewer tokens/frame;
 - ~3.93× fewer layers/work per token;
-- **~687× less transformer work per output frame**.
+- **~712× less transformer work per output frame**.
 
 This is an architectural reduction in circuit size, not a throughput measurement. GPU tok/s
 must still be measured after emission.
@@ -116,7 +116,7 @@ delta/15: instructions=614,807/frame tokens=968,034/frame
 Assembly cumulative CSV frame 5→20:
 
 ```text
-frame 5:  instructions=25,654    tokens=31,773
-frame 20: instructions=93,295    tokens=114,849
-delta/15: instructions=4,509/frame tokens=5,538/frame
+frame 5:  instructions=24,699    tokens=30,808
+frame 20: instructions=89,475    tokens=110,990
+delta/15: instructions=4,318/frame tokens=5,345/frame
 ```

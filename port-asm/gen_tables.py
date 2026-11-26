@@ -143,18 +143,19 @@ cos_vals = [round(math.cos(2 * math.pi * i / NTAB) * 256) for i in range(NTAB)]
 for i in range(0, NTAB, 16):
     lines.append('    .half ' + ','.join(map(str, cos_vals[i:i + 16])))
 
-# Camera angle offsets are pre-doubled byte offsets into raydelta_tab.  The ray loop masks
-# with 510 instead of recomputing sine/cosine and packing dx/dy for every column.
+# Camera angle offsets are pre-doubled byte offsets into raydelta_tab, biased by +64 so the
+# ray loop can use angle+offset directly without a modulo/mask instruction.
 lines += ['    .globl camoff_tab', 'camoff_tab:']
 fov_units = 256 * 60 / 360
-cam = [2 * round((x / (W - 1) - 0.5) * fov_units) for x in range(W)]
+cam = [64 + 2 * round((x / (W - 1) - 0.5) * fov_units) for x in range(W)]
 for i in range(0, W, 16):
     lines.append('    .byte ' + ','.join(map(str, cam[i:i + 16])))
 
 lines += ['    .align 1', '    .globl raydelta_tab', 'raydelta_tab:']
-raydelta = [(cos_vals[i] >> args.ray_shift) + ((sin_vals[i] >> args.ray_shift) << 6)
-            for i in range(NTAB)]
-for i in range(0, NTAB, 16):
+base_delta = [(cos_vals[i] >> args.ray_shift) + ((sin_vals[i] >> args.ray_shift) << 6)
+              for i in range(NTAB)]
+raydelta = [base_delta[(i - 32) & 255] for i in range(320)]
+for i in range(0, len(raydelta), 16):
     lines.append('    .half ' + ','.join(map(str, raydelta[i:i + 16])))
 
 # Wall height by fixed-step count; 45 pixels at one tile.

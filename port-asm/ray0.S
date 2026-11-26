@@ -141,6 +141,7 @@ have_input:
 
     # ------------------------------------------------------------ render one frame
     slli s7, s2, 1              # player angle as a byte offset into raydelta_tab
+    add s7, s7, a1              # biased table needs no per-column modulo/mask
     slli s8, s1, 6
     add s8, s8, s0
     add s8, s8, a7              # postab address of the player position
@@ -151,8 +152,6 @@ column_loop:
     add t0, a6, s3
     lb t0, 0(t0)
     add t0, t0, s7
-    andi t0, t0, 510
-    add t0, t0, a1
     lh s6, 0(t0)                # combined dxsub + dysub*64
     mv s5, s8                   # player postab address
 
