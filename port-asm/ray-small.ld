@@ -1,13 +1,13 @@
 /* Small-memory LX layout for the assembly cost probe.
  *
  * RAM heads are the expensive part of the circuit: 2048 words per key head. This image uses
- * 8 KiB of ROM-prefix and 64 KiB total RAM, so only RAM blocks 1..7 exist instead of the
+ * 8 KiB of ROM-prefix and 32 KiB total RAM, so only RAM blocks 1..3 exist instead of the
  * hundreds needed by the 6 MiB Doom image.
  */
 ENTRY(_start)
 
 TEXT_END = 0x2000;
-RAM_SIZE = 0x10000;
+RAM_SIZE = 0x8000;
 __lx_text_end = TEXT_END;
 __lx_ram_size = RAM_SIZE;
 
