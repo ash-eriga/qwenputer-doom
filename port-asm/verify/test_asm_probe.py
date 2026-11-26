@@ -141,9 +141,9 @@ class AsmProbeVerification(unittest.TestCase):
                 self.assertNotIn('floating-point', counts)
                 widths = kernel_widths(inspect_elf(path)['symbols'])
                 self.assertTrue(widths, 'no generated column kernels found')
-                self.assertEqual(counts.get('sw', 0), sum(15 * w + 1 for w in widths) + 1,
+                self.assertEqual(counts.get('sw', 0), sum(15 * w + 1 for w in widths) + 3,
                                  'each kernel: 15 SW per column plus its pattern marker; '
-                                 'plus the frame-count commit')
+                                 'plus the frame-count commit and the UART key/mode stores')
 
     def test_exact_lx_tokens_and_instructions_per_frame_match_reference(self):
         for name in scenario_definitions():
@@ -188,6 +188,43 @@ class AsmProbeVerification(unittest.TestCase):
                 self.assertEqual(spec['chain_sha256'], hashlib.sha256(chain.encode()).hexdigest())
                 self.assertGreater(len({f['fb_rowmajor_sha256'] for f in run.per_frame}), 100,
                                    'the random-key run should visit many distinct views')
+
+    def test_uart_input_renders_like_poked_keys(self):
+        # The model alone has no host RAM pokes: its host types the key mask over the UART.  The
+        # same schedules delivered that way must render the same pixels, frame for frame, and the
+        # guest must really read every typed byte (one RX token each).
+        defs = scenario_definitions()
+        cases = [(defs[n]['elf'], defs[n]['frames'], defs[n]['script'])
+                 for n in ('host_script_full_24', 'idle_full_8')]
+        spec = load_reference()['long_runs']['random_keys_full_400']
+        cases.append((ROOT / spec['elf'], 120, ROOT / spec['script']))
+        for elf, frames, script in cases:
+            with self.subTest(script=Path(script).name, frames=frames):
+                poke = run_exact(elf, int(frames), script)
+                uart = run_exact(elf, int(frames), script, input_mode='uart')
+                self.assertEqual([f['fb_rowmajor_sha256'] for f in poke.per_frame],
+                                 [f['fb_rowmajor_sha256'] for f in uart.per_frame])
+                typed = uart.token_families.get('KEY0', 0) + uart.token_families.get('KEY', 0)
+                self.assertGreater(typed, 0)
+                self.assertEqual(uart.token_families.get('RX', 0), typed)
+                self.assertEqual(uart.token_families.get('KEY', 0), 0, 'one byte a frame at most')
+
+    def test_uart_byte_with_bit7_hands_control_back(self):
+        import tempfile
+
+        elf = ROOT / 'build' / 'asm-ray0-full.elf'
+        with tempfile.TemporaryDirectory() as td:
+            sched = Path(td) / 'handback.sched'
+            sched.write_text('0 1\n4 128\n')
+            manual = run_exact(elf, 4, sched, input_mode='uart')
+            back = run_exact(elf, 10, sched, input_mode='uart')
+        demo = back.symbols['qwen_demo_enabled'] - S.RAM_BASE
+        key = back.symbols['qwen_key_state'] - S.RAM_BASE
+        self.assertEqual(struct.unpack_from('<I', manual.machine.ram, demo)[0], 0)
+        self.assertEqual(struct.unpack_from('<I', back.machine.ram, demo)[0], 1)
+        self.assertEqual(struct.unpack_from('<I', back.machine.ram, key)[0], 0x80)
+        hashes = [f['fb_rowmajor_sha256'] for f in back.per_frame[5:]]
+        self.assertGreater(len(set(hashes)), 1, 'the autopilot should be moving again')
 
     def test_cost_regressions_exact_and_bounded(self):
         baselines = load_baselines()['scenarios']

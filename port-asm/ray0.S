@@ -9,8 +9,10 @@
 #   * column drawing is a generated straight-line kernel per pixel pattern: 15 SW per column,
 #     skipped when the group already shows that pattern; an unmoved frame is skipped whole
 #
-# Keys match fastemu-lf: bit 0 up, 1 down, 2 left, 3 right.
+# Keys match fastemu-lf: bit 0 up, 1 down, 2 left, 3 right. They come from qwen_key_state, which
+# fastemu pokes, or from the UART: a host driving the model alone types the key mask as one byte.
 
+    .equ UART, 0x10000000       # RBR at +0, LSR at +5 (bit 0: a byte waiting)
     .equ W, 96
     .equ H, 60
     .equ STRIDE, 64
@@ -53,6 +55,21 @@ _start:
     li s2, 64                   # Doom spawn angle 90deg, in 1/256-turn units
 
 main_loop:
+    # ------------------------------------------------------------ host input (UART)
+    # At most one byte a frame. A byte is the new key mask and takes control from the autopilot;
+    # one with bit 7 set hands control back. With nothing waiting this is the LSR load and a branch.
+    li t1, UART
+    lbu t2, 5(t1)
+    andi t2, t2, 1
+    beq t2, zero, no_uart
+    lbu t2, 0(t1)
+    la t0, qwen_key_state
+    sw t2, 0(t0)
+    srli t2, t2, 7
+    la t0, qwen_demo_enabled
+    sw t2, 0(t0)
+no_uart:
+
     # ------------------------------------------------------------ input/movement
     # Default is a baked autopilot: the free-running model needs no host input after GO.
     # qwen_demo_enabled=0 switches to qwen_key_state, which fastemu uses for scripts/live play.

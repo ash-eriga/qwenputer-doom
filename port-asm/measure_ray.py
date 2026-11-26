@@ -15,6 +15,7 @@ M32 = 0xFFFFFFFF
 RAM_BASE = 0x80000000
 RAM_SIZE = 0x600000
 TEXT_END = 0x40000
+UART_LSR = 0x10000005
 
 
 def sx(v, bits):
@@ -129,6 +130,8 @@ def run(path, frames=40, script_path=None):
 
     def lb(addr, signed=False):
         o = addr - RAM_BASE
+        if addr == UART_LSR:
+            return 0x60  # transmit empty, no input: this probe never types
         if not 0 <= o < len(mem):
             raise RuntimeError(f'load outside RAM {addr:#x}')
         v = mem[o]

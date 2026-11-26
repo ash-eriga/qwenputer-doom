@@ -183,14 +183,19 @@ def executable_text_bounds(elf: measure_ray.Elf) -> tuple[int, int]:
 
 
 def run_exact(elf_path: str | Path, frames: int, script_path: str | Path | None = None,
-              max_records: int = 100_000_000) -> ExactRun:
+              max_records: int = 100_000_000, input_mode: str = 'poke') -> ExactRun:
     """Run ``frames`` rendered frames on lx.ref.Machine and capture exact per-frame data.
 
     Host-script application intentionally follows ``measure_exact_lx.py``: because the frame
     counter starts at zero, an event stamped frame N is installed immediately after the frame
     counter is observed at N.  Thus frame 0 input affects the next rendered frame, matching the
     existing measurement script byte-for-byte in timing.
+
+    ``input_mode='uart'`` delivers the same schedule the way a host driving the model alone
+    must: as typed bytes (KEY0 tokens, counted in the stream) at the same frame boundaries, one
+    whenever the mask changes, the first (mask 0) before the first record to take control.
     """
+    assert input_mode in ('poke', 'uart'), input_mode
     elf_path = str(elf_path)
     elf = measure_ray.Elf(elf_path)
     mem = measure_ray.load_memory(elf)
@@ -203,10 +208,12 @@ def run_exact(elf_path: str | Path, frames: int, script_path: str | Path | None 
     fc_addr = elf.symbols['qwen_frame_count'] - S.RAM_BASE
     key_addr = elf.symbols['qwen_key_state'] - S.RAM_BASE
     schedule = measure_ray.read_script(script_path) if script_path else []
-    if schedule and 'qwen_demo_enabled' in elf.symbols:
+    uart = input_mode == 'uart' and bool(schedule)
+    if schedule and not uart and 'qwen_demo_enabled' in elf.symbols:
         demo = elf.symbols['qwen_demo_enabled'] - S.RAM_BASE
         m.ram[demo:demo + 4] = (0).to_bytes(4, 'little')
 
+    typed = 0
     sp = 0
     frames_seen = 0
     tokens = 0
@@ -217,6 +224,17 @@ def run_exact(elf_path: str | Path, frames: int, script_path: str | Path | None 
     boundary_records = 0
     token_families: dict[str, int] = {}
     per_frame: list[dict[str, object]] = []
+
+    def type_byte(b: int) -> None:
+        nonlocal tokens, typed
+        for token in m.key(b):
+            tokens += 1
+            fam = S.family(token)[0]
+            token_families[fam] = token_families.get(fam, 0) + 1
+        typed = b
+
+    if uart:
+        type_byte(0)
 
     while frames_seen < frames and records < max_records:
         toks = m.step()
@@ -231,9 +249,14 @@ def run_exact(elf_path: str | Path, frames: int, script_path: str | Path | None 
             if nf != frames_seen + 1:
                 raise RuntimeError(f'frame counter jumped {frames_seen} -> {nf}')
             frames_seen = nf
+            mask = None
             while sp < len(schedule) and schedule[sp][0] <= frames_seen:
-                m.ram[key_addr:key_addr + 4] = schedule[sp][1].to_bytes(4, 'little')
+                mask = schedule[sp][1]
+                if not uart:
+                    m.ram[key_addr:key_addr + 4] = mask.to_bytes(4, 'little')
                 sp += 1
+            if uart and mask is not None and (mask & 0xFF) != typed:
+                type_byte(mask & 0xFF)
 
             raw_fb, linear_fb = framebuffer_bytes(m.ram, elf.symbols)
             per_frame.append({

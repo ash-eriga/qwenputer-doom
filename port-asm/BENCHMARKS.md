@@ -10,12 +10,12 @@ Interval: frames 5→20 inclusive boundary deltas (15 rendered-frame intervals).
 | guest | resolution/fidelity | instr/frame | exact LX tokens/frame | tokens/instr |
 |---|---|---:|---:|---:|
 | `build/doom-lf.elf` local DoomGeneric build | 192x120, real Doom renderer/game | 614,807 | 968,034 | 1.575 |
-| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 1,376 | 1,663 | 1.208 |
+| `build/asm-ray0-full.elf` | 96x60, assembly raycaster with extracted E1M1 geometry/colors | 1,380 | 1,668 | 1.209 |
 
 Reduction in this interval:
 
-- **446.7× fewer instructions/frame**
-- **582.1× fewer exact LX tokens/frame**
+- **445.4× fewer instructions/frame**
+- **580.3× fewer exact LX tokens/frame**
 
 Twenty output seconds at 10 fps (200 frames) at the measured steady rate:
 
@@ -40,14 +40,25 @@ separately):
 
 | run | before avg | before max | after avg | after max | after frame 1 |
 |---|---:|---:|---:|---:|---:|
-| baked autopilot, 400 frames | 2,980 | 5,031 | 486 | 2,765 | 3,280 |
-| `demo-20s.sched`, 250 frames | 2,955 | 5,297 | 464 | 2,760 | 3,255 |
-| `verify/scenarios/random-keys.sched`, 400 frames | 3,785 | 5,474 | 1,162 | 2,934 | 3,255 |
+| baked autopilot, 400 frames | 2,980 | 5,031 | 491 | 2,769 | 3,285 |
+| `demo-20s.sched`, 250 frames | 2,955 | 5,297 | 469 | 2,764 | 3,261 |
+| `verify/scenarios/random-keys.sched`, 400 frames | 3,785 | 5,474 | 1,167 | 2,939 | 3,261 |
 
-The worst steady frame (all groups change, mostly while turning) is 2,934 tokens, 1.87× below
+The worst steady frame (all groups change, mostly while turning) is 2,939 tokens, 1.86× below
 the old worst frame. `verify/reference_frames.json` holds the row-major frame hashes of the old
 renderer for every verification scenario plus 400/300-frame random-key runs; the suite requires
 the new build to reproduce all of them.
+
+## Host input over the UART
+
+The model alone has no way for the host to poke `qwen_key_state`: the host's only input is a typed
+byte (a KEY0 token at a record boundary), which the guest reads from the UART RBR (an RX token).
+Each frame starts with an LSR load; when a byte waits, it becomes the key mask and switches the
+autopilot off (a byte with bit 7 set switches it back on). The check costs 4 instructions and
+5 tokens a frame (the UART address takes two; the after columns above include it); a key change
+adds the KEY0 token and 8 instructions, the RX load and two stores among them. Delivering `random-keys.sched` this way (54 changes in 400 frames) averages
+1,168 tokens/frame, and `verify/test_asm_probe.py` requires it to render the same pixels as the
+poked schedule.
 
 ## Circuit size lever: small memory
 
@@ -60,9 +71,9 @@ token is much cheaper to execute.
 
 Combined first-order effect before executor-specific optimizations:
 
-- ~582.1× fewer tokens/frame;
+- ~580.3× fewer tokens/frame;
 - ~3.93× fewer layers/work per token;
-- **~2,287× less transformer work per output frame**.
+- **~2,280× less transformer work per output frame**.
 
 The renderer changes above keep `TEXT_END=0x2000` and `RAM_SIZE=0x8000`, so the circuit, and
 an already emitted `packed.pt`, are unchanged: the weights depend only on that configuration.
@@ -146,9 +157,9 @@ delta/15: instructions=614,807/frame tokens=968,034/frame
 Assembly cumulative CSV frame 5→20:
 
 ```text
-frame 5:  instructions=8,775     tokens=10,670
-frame 20: instructions=29,419    tokens=35,616
-delta/15: instructions=1,376/frame tokens=1,663/frame
+frame 5:  instructions=8,795     tokens=10,695
+frame 20: instructions=29,499    tokens=35,717
+delta/15: instructions=1,380/frame tokens=1,668/frame
 ```
 
 The same interval for the per-column renderer at d84769f was 3,570 instructions and 4,298

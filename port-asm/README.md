@@ -20,6 +20,10 @@ Tricks used:
 - expanded `map256`, indexed directly by packed tile bits.
 - baked autopilot by default, because a free-running in-weights clip cannot depend on host
   feedback; `qwen_demo_enabled=0` switches back to `qwen_key_state` for native scripts/live input.
+- live input over the UART: each frame the guest checks the line status register (4
+  instructions, 5 tokens when nothing is waiting) and takes a waiting byte as its key mask (bit 0
+  up, 1 down, 2 left, 3 right); a byte with bit 7 set hands control back to the autopilot. The
+  host only ever types bytes (KEY0 tokens); it never pokes guest memory.
 
 Build and measure:
 
@@ -39,10 +43,10 @@ Current local measurement on the baked autopilot (`measure_exact_lx.py`, exact `
 token stream, full-step build, 20 frames, first frame included):
 
 ```text
-instr/frame=1471.0
-tokens/frame=1780.8
+instr/frame=1475.0
+tokens/frame=1785.8
 tokens/instr=1.211
-20s_at_10fps_tokens=356160
+20s_at_10fps_tokens=357170
 ```
 
 The fastemu visual build is only for debugging: its linear transpose is intentionally excluded
