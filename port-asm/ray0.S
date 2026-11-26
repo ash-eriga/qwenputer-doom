@@ -12,10 +12,20 @@
 # Keys match fastemu-lf: bit 0 up, 1 down, 2 left, 3 right. They come from qwen_key_state, which
 # fastemu pokes, or from the UART: a host driving the model alone types the key mask as one byte.
 
+#ifndef FB_W
+#define FB_W 96
+#endif
+#ifndef FB_H
+#define FB_H 60
+#endif
+#ifndef FB_STRIDE
+#define FB_STRIDE 64
+#endif
+
     .equ UART, 0x10000000       # RBR at +0, LSR at +5 (bit 0: a byte waiting)
-    .equ W, 96
-    .equ H, 60
-    .equ STRIDE, 64
+    .equ W, FB_W
+    .equ H, FB_H
+    .equ STRIDE, FB_STRIDE
 
 #ifndef VISUAL
 #define VISUAL 0
@@ -179,7 +189,8 @@ render_done:
 vis_x_loop:
     li s8, 0                    # y
 vis_y_loop:
-    slli s9, s7, 6
+    li s9, STRIDE
+    mul s9, s7, s9
     add s9, s9, s8
     add s9, s9, t0
     lbu s10, 0(s9)

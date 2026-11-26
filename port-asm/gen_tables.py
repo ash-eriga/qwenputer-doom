@@ -12,20 +12,28 @@ import math
 import sys
 from pathlib import Path
 
-W, H = 96, 60
 NTAB = 256
 GRID = 16
 SUB = 4                 # quarter-tile units; keeps the direct position table at 4 KiB
 XSUBS = GRID * SUB      # linear packed row stride: xsub + ysub*64
 POSTAB_SIZE = XSUBS * XSUBS
-FB_STRIDE = 64          # bytes per framebuffer column: 60 visible pixels + one hidden word
 CASES = 64
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--step-tiles', type=float, default=1.0, help='ray step length in tiles')
 ap.add_argument('--ray-shift', type=int, default=6, help='assembly trig shift for this build')
 ap.add_argument('--suffix', default='full', help='output suffix')
+ap.add_argument('--width', type=int, default=96, help='framebuffer width')
+ap.add_argument('--height', type=int, default=60, help='framebuffer height (multiple of 4)')
+ap.add_argument('--stride', type=int, default=0,
+                help='column stride in bytes (>= height + 4, multiple of 4; 0 = height + 4)')
 args = ap.parse_args()
+
+W, H = args.width, args.height
+assert H % 4 == 0, f'height must be a multiple of 4, got {H}'
+FB_STRIDE = args.stride or (H + 4)
+assert FB_STRIDE >= H + 4 and FB_STRIDE % 4 == 0, f'bad stride {FB_STRIDE} for height {H}'
+H_WORDS = H // 4
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -156,10 +164,10 @@ raydelta = [base_delta[(i - 32) & 255] for i in range(320)]
 for i in range(0, len(raydelta), 16):
     lines.append('    .half ' + ','.join(map(str, raydelta[i:i + 16])))
 
-# Wall height by fixed-step count; 45 pixels at one tile.
+# Wall height by fixed-step count; 3/4 of screen height at one tile.
 h = [0] * (CASES + 1)
 for steps in range(1, CASES + 1):
-    h[steps] = min(H, max(1, round(45 / (steps * args.step_tiles))))
+    h[steps] = min(H, max(1, round((H * 0.75) / (steps * args.step_tiles))))
 lines += ['    .globl height_tab', 'height_tab:']
 for i in range(0, CASES + 1, 16):
     chunk = h[i:i + 16]
@@ -215,7 +223,7 @@ def column_colors(steps):
     hh = h[steps]
     top = (H - hh) // 2
     colors = []
-    for group in range(15):
+    for group in range(H_WORDS):
         y = group * 4 + 1.5
         if y < top:
             colors.append('a2')

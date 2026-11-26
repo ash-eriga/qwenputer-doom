@@ -8,6 +8,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
 python3 "$HERE/gen_tables.py" --step-tiles 1.0 --ray-shift 6 --suffix full >/dev/null
 python3 "$HERE/gen_tables.py" --step-tiles 0.5 --ray-shift 7 --suffix half >/dev/null
+python3 "$HERE/gen_tables.py" --step-tiles 1.0 --ray-shift 6 --width 192 --height 120 --stride 124 --suffix 192 >/dev/null
 GCC=${GCC:-riscv64-unknown-elf-gcc}
 CFLAGS="-march=rv32im -mabi=ilp32 -Os -nostdlib -nostartfiles -static -T$HERE/../port-lf/doom-lf.ld"
 mkdir -p "$ROOT/build"
@@ -20,6 +21,10 @@ $GCC $CFLAGS -DVISUAL=1 -DRAY_SHIFT=6 -o "$ROOT/build/asm-ray0-vis.elf" \
 $GCC -march=rv32im -mabi=ilp32 -Os -nostdlib -nostartfiles -static \
     -T"$HERE/ray-small.ld" -DVISUAL=0 -DRAY_SHIFT=6 -o "$ROOT/build/asm-ray0-small.elf" \
     "$HERE/ray0.S" "$HERE/tables-full.S" "$HERE/kernels-full.S"
+$GCC -march=rv32im -mabi=ilp32 -Os -nostdlib -nostartfiles -static \
+    -T"$HERE/ray-192.ld" -DVISUAL=0 -DRAY_SHIFT=6 -DFB_W=192 -DFB_H=120 -DFB_STRIDE=124 \
+    -o "$ROOT/build/asm-ray0-192.elf" \
+    "$HERE/ray0.S" "$HERE/tables-192.S" "$HERE/kernels-192.S"
 cp "$ROOT/build/asm-ray0-full.elf" "$ROOT/build/asm-ray0.elf"
 riscv64-unknown-elf-size -A "$ROOT/build/asm-ray0-full.elf" | grep -E '^\.(text|rodata|data|bss)' || true
-echo "built asm-ray0-full.elf, asm-ray0-half.elf, asm-ray0-vis.elf and asm-ray0-small.elf"
+echo "built asm-ray0-full.elf, asm-ray0-half.elf, asm-ray0-vis.elf, asm-ray0-small.elf and asm-ray0-192.elf"

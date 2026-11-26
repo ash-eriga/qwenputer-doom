@@ -18,7 +18,7 @@
 #           colours), all checked against SHA256SUMS
 #
 # Environment: WORK (default <repo>/build/gpu), PYTHON (default python3), CUDA_FLAVOR (cu130 or
-# cu128; default from the driver), STEPS (default "python lxsrc assets").
+# cu128; default from the driver), STEPS (default "python lxsrc assets"), RES (96 or 192; default 96).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -26,17 +26,26 @@ REPO=$(cd "$HERE/../../.." && pwd)
 WORK=${WORK:-$REPO/build/gpu}
 PYTHON=${PYTHON:-python3}
 STEPS=${STEPS:-python lxsrc assets}
+RES=${RES:-96}
 RELEASE=https://github.com/ash-eriga/qwenputer-doom/releases/download/ray0-gpu-assets-v1
 DOOM_ON_QWEN=https://github.com/ash-eriga/Doom-On-Qwen
 LXSRC=$(dirname "$REPO")/Doom-On-Qwen/lxsrc
 VENV=$WORK/venv
 CHECK=1
-for a in "$@"; do
-    case $a in
+while [ $# -gt 0 ]; do
+    case $1 in
         --no-check) CHECK=0 ;;
-        *) echo "unknown argument $a" >&2; exit 2 ;;
+        --res) shift; RES=${1:?missing value for --res} ;;
+        --res=*) RES=${1#--res=} ;;
+        *) echo "unknown argument $1" >&2; exit 2 ;;
     esac
+    shift
 done
+case $RES in
+    96)  ELF_NAME=asm-ray0-small.elf; PACKED_NAME=packed.pt ;;
+    192) ELF_NAME=asm-ray0-192.elf;   PACKED_NAME=packed-192.pt ;;
+    *) echo "unsupported RES=$RES (use 96 or 192)" >&2; exit 2 ;;
+esac
 mkdir -p "$WORK"
 say() { printf '\n== %s\n' "$*"; }
 has() { case " $STEPS " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -136,28 +145,28 @@ step_lxsrc() {
 }
 
 step_assets() {
-    say "assets in $WORK"
+    say "assets in $WORK (RES=$RES: $ELF_NAME, $PACKED_NAME)"
     cd "$WORK"
     # the query string skips a stale cached copy after the release's assets change
     curl -fsSL -o SHA256SUMS "$RELEASE/SHA256SUMS?t=$(date +%s)"
-    for f in packed.pt.gz asm-ray0-small.elf playpal.wad; do
+    for f in "${PACKED_NAME}.gz" "$ELF_NAME" playpal.wad; do
         if [ ! -f "$f" ] || ! grep " $f\$" SHA256SUMS | sha256sum -c --status; then
             echo "downloading $f"
             curl -fsSL --retry 3 -o "$f" "$RELEASE/$f"
         fi
         grep " $f\$" SHA256SUMS | sha256sum -c
     done
-    if [ ! -f packed.pt ] || ! grep ' packed.pt$' SHA256SUMS | sha256sum -c --status; then
-        echo "decompressing packed.pt (4.2 GB)"
-        gzip -dc packed.pt.gz > packed.pt.tmp && mv packed.pt.tmp packed.pt
+    if [ ! -f "$PACKED_NAME" ] || ! grep " $PACKED_NAME\$" SHA256SUMS | sha256sum -c --status; then
+        echo "decompressing $PACKED_NAME (~4 GB)"
+        gzip -dc "${PACKED_NAME}.gz" > "${PACKED_NAME}.tmp" && mv "${PACKED_NAME}.tmp" "$PACKED_NAME"
     fi
-    grep ' packed.pt$' SHA256SUMS | sha256sum -c
+    grep " $PACKED_NAME\$" SHA256SUMS | sha256sum -c
     mkdir -p "$REPO/build"
-    local elf=$REPO/build/asm-ray0-small.elf
-    if [ -f "$elf" ] && ! cmp -s "$elf" asm-ray0-small.elf; then
-        echo "keeping your own build/asm-ray0-small.elf (the release one is $WORK/asm-ray0-small.elf)"
+    local elf=$REPO/build/$ELF_NAME
+    if [ -f "$elf" ] && ! cmp -s "$elf" "$ELF_NAME"; then
+        echo "keeping your own build/$ELF_NAME (the release one is $WORK/$ELF_NAME)"
     else
-        cp asm-ray0-small.elf "$elf"
+        cp "$ELF_NAME" "$elf"
     fi
     cd "$REPO"
 }
@@ -167,8 +176,9 @@ for s in python lxsrc assets; do
 done
 
 if [ -f "$WORK/env.sh" ]; then . "$WORK/env.sh"; fi
-CMD=("$VENV/bin/python" port-asm/integration/gpu/mega_check.py --packed "$WORK/packed.pt"
-     --wad "$WORK/playpal.wad" --png-dir "$WORK/frames" --out "$WORK/mega-check.json")
+CMD=("$VENV/bin/python" port-asm/integration/gpu/mega_check.py --elf "$REPO/build/$ELF_NAME"
+     --packed "$WORK/$PACKED_NAME" --wad "$WORK/playpal.wad"
+     --png-dir "$WORK/frames" --out "$WORK/mega-check.json")
 if [ "$CHECK" = 1 ]; then
     say "validation: ${CMD[*]}"
     cd "$REPO"
@@ -178,5 +188,5 @@ else
     say "ready"
     if [ -f "$WORK/env.sh" ]; then echo ". $WORK/env.sh"; fi
     echo "${CMD[*]}"
-    echo "$VENV/bin/python port-asm/integration/gpu/mega_live.py --packed $WORK/packed.pt --wad $WORK/playpal.wad --token \$(openssl rand -hex 8)"
+    echo "$VENV/bin/python port-asm/integration/gpu/mega_live.py --elf $REPO/build/$ELF_NAME --packed $WORK/$PACKED_NAME --wad $WORK/playpal.wad --token \$(openssl rand -hex 8)"
 fi
