@@ -40,6 +40,34 @@ Combined first-order effect before executor-specific optimizations:
 This is an architectural reduction in circuit size, not a throughput measurement. GPU tok/s
 must still be measured after emission.
 
+
+## Local small-circuit emission smoke test
+
+Command:
+
+```sh
+python3 -m venv /tmp/lxenv
+/tmp/lxenv/bin/pip install numpy torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+/tmp/lxenv/bin/pip install transformers==5.22 fla-core==0.5.2 flash-linear-attention==0.5.2
+/tmp/lxenv/bin/pip install --no-deps torchcodec
+/tmp/lxenv/bin/python port-asm/emit_small.py build/asm-ray0-small.elf \
+  --data /tmp/asm-emit-data --work /tmp/asm-emit-work
+```
+
+Observed locally:
+
+```text
+emit config ram_size=0x8000 text_end=0x2000
+circuit {'layers': 14, 'dims': 3572, 'heads': 32, 'ffn_units': 36720,
+         'max_units': 8102, 'max_heads': 10} hidden 3840 layers 14
+streamed 219s, packed nonzeros 0.11 GiB
+wrote /tmp/asm-emit-work/packed.pt 3.89 GiB
+```
+
+The large file size is dominated by dense model tensors, especially the token embedding/head,
+not by the small circuit's sparse layer payload. Reducing that format is an executor/packaging
+optimization, not a correctness requirement for the first GPU run.
+
 ## Important comparability caveat
 
 This is **not yet an apples-to-apples Doom replacement**. The baseline is real DoomGeneric at
