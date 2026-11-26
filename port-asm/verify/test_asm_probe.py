@@ -232,6 +232,21 @@ class AsmProbeVerification(unittest.TestCase):
         self.assertNotEqual(run.per_frame[0]['fb_cols_sha256'], run.per_frame[-1]['fb_cols_sha256'],
                             'autopilot frames should not collapse to a static image')
 
+    def test_gpu_runner_cpu_self_test_and_static_config(self):
+        runner = PORT_ASM_DIR / 'integration' / 'gpu' / 'run_ray0.py'
+        self.assertTrue(runner.exists(), 'GPU runner is missing')
+        subprocess.run([sys.executable, str(runner), '--self-test'],
+                       cwd=ROOT, text=True, capture_output=True, check=True)
+        out = subprocess.run([sys.executable, str(runner), '--print-config'],
+                             cwd=ROOT, text=True, capture_output=True, check=True).stdout
+        cfg = json.loads(out)
+        self.assertEqual(cfg['ram_size'], 0x8000)
+        self.assertEqual(cfg['text_end'], 0x2000)
+        self.assertEqual(cfg['framebuffer']['width'], 96)
+        self.assertEqual(cfg['framebuffer']['height'], 60)
+        self.assertEqual(cfg['framebuffer']['stride'], 64)
+        self.assertEqual(cfg['symbols']['qwen_frame_count']['offset'] & 3, 0)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
