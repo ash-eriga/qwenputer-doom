@@ -5,3 +5,6 @@ doomgeneric/
 *.deb
 *.ppm
 __pycache__/
+port-asm/tables*.S
+port-asm/kernels*.S
+fastemu-lf
