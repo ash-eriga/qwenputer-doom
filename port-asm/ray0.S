@@ -40,6 +40,7 @@ _start:
     la a6, camoff_tab
     la a7, postab
     la a0, colkern_base
+    la a1, raydelta_tab
     .option pop
 
     # Real quantized E1M1 colors generated into render_words.  Keep all seven live in
@@ -139,29 +140,20 @@ have_input:
 5:
 
     # ------------------------------------------------------------ render one frame
+    slli s7, s2, 1              # player angle as a byte offset into raydelta_tab
+    slli s8, s1, 6
+    add s8, s8, s0
+    add s8, s8, a7              # postab address of the player position
     li s3, 0                    # column x
 column_loop:
-    # ray angle = player angle + camera offset[x]
+    # ray angle = player angle + camera offset[x], both pre-doubled byte offsets.
     add t0, a6, s3
     lb t0, 0(t0)
-    add t0, t0, s2
-    andi t0, t0, 255
-    slli t0, t0, 1
-
-    add t1, tp, t0
-    lh t1, 0(t1)
-    srai s7, t1, RAY_SHIFT      # ray step x in quarter-tile units
-    add t1, gp, t0
-    lh t1, 0(t1)
-    srai s8, t1, RAY_SHIFT      # ray step y in quarter-tile units
-
-    # postab is linear: xsub + ysub*64.  One combined signed delta therefore moves the
-    # direct table address in both axes with a single ADD per probe.
-    slli t1, s8, 6
-    add s6, s7, t1
-    slli s5, s1, 6
-    add s5, s5, s0
-    add s5, s5, a7
+    add t0, t0, s7
+    andi t0, t0, 510
+    add t1, a1, t0
+    lh s6, 0(t1)                # combined dxsub + dysub*64
+    mv s5, s8                   # player postab address
 
     li s9, GROUPS
 march_loop:
