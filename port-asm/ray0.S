@@ -21,12 +21,6 @@
 #define RAY_SHIFT 6             # 8.8 trig -> quarter-tile units; full step is one tile
 #endif
 
-.macro PROBE hitlabel
-    add s5, s5, s6              # postab address += dxsub + dysub*64
-    lbu s10, 0(s5)
-    bne s10, zero, \hitlabel
-.endm
-
     .section .text.init
     .globl _start
 _start:
@@ -40,7 +34,6 @@ _start:
     la a6, fb_cols
     addi a6, a6, -64            # framebuffer end sentinel
     la a7, postab
-    la a0, colkern_base + 4160   # one past the maximum-distance kernel case
     la a1, raydelta_tab
     .option pop
 
@@ -152,38 +145,9 @@ column_loop:
     lb t0, 60(s4)               # immutable camera offset in hidden stride padding
     add t0, t0, s7
     lh s6, 0(t0)                # combined dxsub + dysub*64
-    li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
 
-    # Peel probe 1: it can start from the player address directly, so no copy is needed.
-    add s5, s8, s6
-    lbu s10, 0(s5)
-    bne s10, zero, hit0
-march_loop:
-    PROBE hit1
-    PROBE hit2
-    PROBE hit3
-    addi s9, s9, -256
-    PROBE hit0
-    bne s9, zero, march_loop
-    addi t0, a0, -64
-    jr t0                       # miss: maximum-distance case 64
-
-# a0=colkern_base+4160 and s9=256*groups_left, so a0-s9 is exactly case hit0.
-hit0:
-    sub t0, a0, s9
-    jr t0
-hit1:
-    addi t0, s9, -64
-    sub t0, a0, t0
-    jr t0
-hit2:
-    addi t0, s9, -128
-    sub t0, a0, t0
-    jr t0
-hit3:
-    addi t0, s9, -192
-    sub t0, a0, t0
-    jr t0
+    # Generated unrolled probes branch directly to fixed-distance column kernels.
+#include "march.S"
 
     .globl colkern_done
 colkern_done:

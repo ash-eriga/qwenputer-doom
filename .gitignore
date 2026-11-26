@@ -7,4 +7,5 @@ doomgeneric/
 __pycache__/
 port-asm/tables*.S
 port-asm/kernels*.S
+port-asm/march.S
 fastemu-lf

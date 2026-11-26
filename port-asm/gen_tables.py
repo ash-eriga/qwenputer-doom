@@ -233,6 +233,7 @@ for steps in range(1, CASES + 1):
         else:
             colors.append('a4')
     assert len(colors) == 15
+    kernel.append(f'    .globl colkern_{steps}')
     kernel.append(f'colkern_{steps}:')
     for i, reg in enumerate(colors):
         kernel.append(f'    sw {reg},{4 * i}(s4)')
@@ -241,5 +242,18 @@ for steps in range(1, CASES + 1):
 
 kout = HERE / f'kernels-{args.suffix}.S'
 kout.write_text('\n'.join(kernel) + '\n')
+
+# Fully unroll the 64 ray probes.  Every probe branches straight to its fixed-distance kernel,
+# so the guest pays no group counter, distance arithmetic, or indirect dispatch in the hot loop.
+march = ['# generated unrolled ray march',
+         '    add s5,s8,s6',
+         '    lbu s10,0(s5)',
+         '    bne s10,zero,colkern_1']
+for steps in range(2, CASES + 1):
+    march += ['    add s5,s5,s6',
+              '    lbu s10,0(s5)',
+              f'    bne s10,zero,colkern_{steps}']
+march.append('    j colkern_64')
+(HERE / 'march.S').write_text('\n'.join(march) + '\n')
 print(out)
 print(kout)
