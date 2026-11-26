@@ -65,8 +65,7 @@ wrote /tmp/asm-emit-work/packed.pt 3.89 GiB
 ```
 
 The large file size is dominated by dense model tensors, especially the token embedding/head,
-not by the small circuit's sparse layer payload. Reducing that format is an executor/packaging
-optimization, not a correctness requirement for the first GPU run.
+not by the small circuit's sparse layer payload. `port-asm/packedzip.py` compresses the emitted artifact for transport; the local 3.89 GiB `packed.pt` becomes a 33 MiB gzip stream (`sha256=3100ef0748f62f62310932d0ec58dd60b04484d8c1c0461807cba6d5db58b030`).
 
 ## Important comparability caveat
 
