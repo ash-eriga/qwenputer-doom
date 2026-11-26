@@ -22,6 +22,24 @@ Twenty output seconds at 10 fps (200 frames) at the measured steady rate:
 - DoomGeneric local build: **~193.6M tokens**
 - assembly cost probe: **~2.37M tokens**
 
+## Circuit size lever: small memory
+
+The LX circuit allocates one RAM key head per 2048 words. The normal Doom image uses
+`RAM_SIZE=0x600000`, producing **55 layers**. The assembly probe also builds as
+`asm-ray0-small.elf` with `TEXT_END=0x2000` and `RAM_SIZE=0x10000`; building the circuit IR
+for that configuration produces **14 layers** and 36 RAM-related heads instead of 55 layers and
+768 heads. Token cost per frame is unchanged because guest semantics are identical, but each
+token is much cheaper to execute.
+
+Combined first-order effect before executor-specific optimizations:
+
+- ~81.8× fewer tokens/frame;
+- ~3.93× fewer layers/work per token;
+- **~321× less transformer work per output frame**.
+
+This is an architectural reduction in circuit size, not a throughput measurement. GPU tok/s
+must still be measured after emission.
+
 ## Important comparability caveat
 
 This is **not yet an apples-to-apples Doom replacement**. The baseline is real DoomGeneric at

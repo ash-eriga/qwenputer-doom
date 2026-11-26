@@ -19,7 +19,7 @@ for cand in (ROOT / 'Doom-On-Qwen' / 'lxsrc' / 'lx', ROOT / 'linuxformer' / 'lx'
 
 from lx import spec as S  # noqa: E402
 from lx.ref import Machine  # noqa: E402
-from measure_ray import Elf, load_memory, read_script  # noqa: E402
+from measure_ray import Elf, load_memory, machine_config, read_script  # noqa: E402
 
 
 def main():
@@ -44,8 +44,9 @@ def main():
     key_off = off('qwen_key_state', a.key_off)
     demo_off = off('qwen_demo_enabled', a.demo_off)
 
-    ram = load_memory(elf)
-    m = Machine(ram, 0x40000)
+    ram_size, text_end = machine_config(elf)
+    ram = load_memory(elf, ram_size)
+    m = Machine(ram, text_end)
     m.x[2] = S.RAM_BASE + len(ram) - 16
     m.anchor = (elf.entry - S.RAM_BASE) >> 2
     m.n = 0

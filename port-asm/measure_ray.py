@@ -60,10 +60,17 @@ class Elf:
                 self.symbols[b[str_off + nm:end].decode()] = value
 
 
-def load_memory(elf):
-    mem = bytearray(RAM_SIZE)
+def machine_config(elf):
+    ram_size = elf.symbols.get('__lx_ram_size', RAM_SIZE)
+    text_end = elf.symbols.get('__lx_text_end', TEXT_END)
+    return ram_size, text_end
+
+
+def load_memory(elf, ram_size=None):
+    ram_size = ram_size or machine_config(elf)[0]
+    mem = bytearray(ram_size)
     for off, va, filesz, memsz in elf.segments:
-        if va < RAM_BASE or va + memsz > RAM_BASE + RAM_SIZE:
+        if va < RAM_BASE or va + memsz > RAM_BASE + ram_size:
             raise ValueError(f'segment outside LX image: {va:#x}+{memsz:#x}')
         mem[va - RAM_BASE:va - RAM_BASE + filesz] = elf.bytes[off:off + filesz]
     return mem
@@ -86,10 +93,11 @@ def read_script(path):
 
 def run(path, frames=40, script_path=None):
     elf = Elf(path)
-    mem = load_memory(elf)
+    ram_size, text_end = machine_config(elf)
+    mem = load_memory(elf, ram_size)
     x = [0] * 32
     pc = elf.entry
-    x[2] = RAM_BASE + RAM_SIZE - 16
+    x[2] = RAM_BASE + ram_size - 16
     fc_addr = elf.symbols['qwen_frame_count']
     key_addr = elf.symbols.get('qwen_key_state', 0)
     schedule = read_script(script_path)
@@ -166,7 +174,7 @@ def run(path, frames=40, script_path=None):
                 schedule_pos += 1
 
     while frames_seen < frames:
-        if pc < RAM_BASE or pc >= RAM_BASE + TEXT_END or pc & 3:
+        if pc < RAM_BASE or pc >= RAM_BASE + text_end or pc & 3:
             raise RuntimeError(f'bad pc {pc:#x}')
         pc0 = pc
         w = lw(pc)

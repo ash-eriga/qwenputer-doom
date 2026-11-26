@@ -30,6 +30,7 @@ jobs:
         run: |
           python3 port-asm/measure_ray.py build/asm-ray0-full.elf 20 | tee /tmp/full.txt
           python3 port-asm/measure_ray.py build/asm-ray0-half.elf 20 | tee /tmp/half.txt
+          python3 port-asm/measure_ray.py build/asm-ray0-small.elf 20 | tee /tmp/small.txt
           python3 - <<'PY'
           import re
           def tokens_per_frame(path):
@@ -39,7 +40,9 @@ jobs:
               return float(m.group(1))
           full = tokens_per_frame('/tmp/full.txt')
           half = tokens_per_frame('/tmp/half.txt')
-          print(f'full={full:.1f} tokens/frame half={half:.1f} tokens/frame')
+          small = tokens_per_frame('/tmp/small.txt')
+          print(f'full={full:.1f} half={half:.1f} small={small:.1f} tokens/frame')
           assert full < 15000, full
           assert half < 25000, half
+          assert small < 15000, small
           PY

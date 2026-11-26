@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / 'Doom-On-Qwen' / 'lxsrc' / 'lx'))
 
 from lx.ref import Machine  # noqa: E402
 from lx import spec as S  # noqa: E402
-from measure_ray import Elf, load_memory, read_script  # noqa: E402
+from measure_ray import Elf, load_memory, machine_config, read_script  # noqa: E402
 
 RAM_BASE = S.RAM_BASE
 
@@ -22,8 +22,9 @@ def main():
     a = ap.parse_args()
 
     elf = Elf(a.elf)
-    mem = load_memory(elf)
-    m = Machine(mem, text_end=0x40000)
+    ram_size, text_end = machine_config(elf)
+    mem = load_memory(elf, ram_size)
+    m = Machine(mem, text_end=text_end)
     m.x[2] = RAM_BASE + len(mem) - 16
     m.anchor = (elf.entry - RAM_BASE) // 4
     m.n = 0

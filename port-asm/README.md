@@ -28,6 +28,7 @@ Outputs:
 - `build/asm-ray0-full.elf` — one-tile ray steps, fastest, occasional corner artifacts
 - `build/asm-ray0-half.elf` — half-tile ray steps, cleaner walls, higher cost
 - `build/asm-ray0-vis.elf` — debug/visual build with a linear copy for `fastemu-lf` dumps
+- `build/asm-ray0-small.elf` — same cost build linked into a 64 KiB LX image (`TEXT_END=8 KiB`), reducing the circuit shape from 55 layers to 14 layers
 
 Current local measurement on the baked autopilot (`measure_exact_lx.py`, exact `lx.ref.Machine`
 token stream, full-step build, 20 frames):
