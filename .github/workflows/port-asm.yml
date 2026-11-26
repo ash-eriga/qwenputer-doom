@@ -26,6 +26,9 @@ jobs:
             exit 1
           fi
 
+      - name: Run deterministic verification suite
+        run: python3 port-asm/verify/run_verify.py --no-build
+
       - name: Measure cost ceilings
         run: |
           python3 port-asm/measure_ray.py build/asm-ray0-full.elf 20 | tee /tmp/full.txt
