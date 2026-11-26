@@ -53,5 +53,8 @@ The fastemu visual build is only for debugging: its linear transpose is intentio
 from the cost build. A real in-weights integration should teach the host readout to unpack the
 column-major framebuffer instead of paying for a guest-side transpose.
 
+Running it inside the model on a GPU (the megakernel port, L4 and H100/H200 validation, live play
+in a browser): [`integration/gpu/megakernel/README.md`](integration/gpu/megakernel/README.md).
+
 Caveat: this proves the cost floor and the assembly techniques. It is not yet E1M1/Doom physics,
 BSP, sprites, weapons, or WAD-backed geometry.

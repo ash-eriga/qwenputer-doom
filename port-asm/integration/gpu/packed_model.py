@@ -63,6 +63,65 @@ def build_fast(blob: dict):
     return f
 
 
+def build_decode_plan(f, model) -> list:
+    """lx.fast's single-token plan (Fast.dec, what Fast.decode and the megakernel run) from the
+    packed layers alone. Fast._dec reads in_proj_z and out_proj from the dense model, which
+    packed.pt does not carry; the packed _GDN.out holds the same nonzero parts per live key head:
+    (in_proj_z[dims][:, cin_z], out_proj[out_rows][:, dims] as fp32, exact bf16 values)."""
+    import torch
+    from lx.fast import _Dec
+
+    dec = []
+    for L in range(f.n_chip):
+        layer = model.model.layers[L]
+        g, m = f.layers[L]
+        vd, r, nkh = f.vd, f.r, len(g.kh)
+        d = _Dec(gdn=bool(len(g.pc)), mlp=bool(len(m.rows)))
+        if d.gdn:
+            dev, dt = g.pc.device, g.w_p.dtype
+            norm = layer.input_layernorm
+            vh = (g.kh[:, None] * r + torch.arange(r, device=dev)).reshape(-1)
+            cu = torch.unique(torch.cat([g.cin, g.cin_b, g.cin_a, g.cin_z]))
+
+            def over_cu(w, cin):
+                out = torch.zeros(w.shape[0], len(cu), dtype=w.dtype, device=dev)
+                out[:, torch.searchsorted(cu, cin)] = w
+                return out
+
+            n_out, n_z = len(g.out_rows), len(g.cin_z)
+            # a key head without output (None) reads in_proj_z only into a zero out_proj
+            wz = [o[0] if o is not None else torch.zeros(r * vd, n_z, dtype=dt, device=dev)
+                  for o in g.out]
+            wo = [o[1].to(dt) if o is not None else torch.zeros(n_out, r * vd, dtype=dt,
+                                                                 device=dev) for o in g.out]
+            wz = torch.cat(wz) if wz else torch.zeros(0, n_z, dtype=dt, device=dev)
+            wo = torch.cat(wo, 1) if wo else torch.zeros(n_out, 0, dtype=dt, device=dev)
+            assert all(o is None or torch.equal(o[1].to(dt).float(), o[1]) for o in g.out)
+            parts = [over_cu(g.w_p, g.cin), over_cu(g.w_b, g.cin_b)]
+            if g.decays:
+                parts.append(over_cu(g.w_a, g.cin_a))
+            parts.append(over_cu(wz, g.cin_z))
+            contig = nkh and bool((vh == torch.arange(int(vh[0]), int(vh[0]) + len(vh),
+                                                      device=dev)).all())
+            d.eps, d.cu, d.w1u = norm.eps, cu, (1.0 + norm.weight.float().to(dev))[cu]
+            d.w_in, d.n_p, d.n_b = torch.cat(parts).contiguous(), len(g.pc), nkh * r
+            d.n_a = nkh * r if g.decays else 0
+            d.pc, d.w_conv, d.qkv_idx, d.nkh = g.pc, g.w_conv, g.qkv_idx, nkh
+            d.hv = slice(int(vh[0]), int(vh[0]) + len(vh)) if contig else vh
+            d.decays, d.a_neg, d.dt_bias = g.decays, g.a_neg, g.dt_bias
+            d.w_out = wo.contiguous()
+            d.out_rows, d.zero = g.out_rows, torch.zeros(1, dtype=dt, device=dev)
+        if d.mlp:
+            norm = layer.post_attention_layernorm
+            dev = m.cin.device
+            d.eps_m, d.m_cin = norm.eps, m.cin
+            d.w1m = (1.0 + norm.weight.float().to(dev))[m.cin]
+            d.w_gu, d.n_u = torch.cat([m.w_g, m.w_u]).contiguous(), m.w_g.shape[0]
+            d.w_d, d.m_rows = m.w_d, m.rows
+        dec.append(d)
+    return dec
+
+
 def make_initial_machine(elf: Elf32, cfg: dict):
     from lx.ref import Machine
 

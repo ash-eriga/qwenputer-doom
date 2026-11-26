@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ray0 on Qwen: live</title>
+<style>
+  body { background:#111; color:#ddd; font-family:system-ui,sans-serif; text-align:center; margin:1.5em; }
+  #fb { width:min(768px,95vw); image-rendering:pixelated; border:2px solid #333; background:#000; }
+  .sub { color:#888; font-size:.9em; }
+  #status { font-family:ui-monospace,monospace; font-size:.85em; color:#aaa; margin:.6em auto; }
+  #verified.ok { color:#6c6; } #verified.bad { color:#e55; }
+  button { background:#222; color:#ddd; border:1px solid #555; border-radius:8px;
+           padding:.6em 1em; font-size:1em; cursor:pointer; touch-action:none;
+           user-select:none; -webkit-user-select:none; }
+  button.active { background:#7a1f1f; border-color:#c33; }
+  button.mode.active { background:#1f4d7a; border-color:#39c; }
+  .pad { display:grid; grid-template-columns:repeat(3, 64px); gap:6px; justify-content:center; margin:.8em auto; }
+  .pad button { padding:.8em 0; }
+  .row { display:flex; gap:6px; justify-content:center; margin:.4em auto; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<h2>ray0 inside Qwen3.5's weights</h2>
+<img id="fb" src="frame.png" alt="frame">
+<div id="status">starting&hellip;</div>
+<div class="row">
+  <button id="btn-demo" class="mode active">Autopilot: ON</button>
+  <button id="btn-manual" class="mode">Take control</button>
+</div>
+<div class="pad">
+  <span></span><button data-bit="0">&#9650;</button><span></span>
+  <button data-bit="2">&#9664;</button><button data-bit="1">&#9660;</button><button data-bit="3">&#9654;</button>
+</div>
+<p class="sub">Arrows or WASD. Every token is the model's own prediction; your keys reach the guest
+as bytes over its UART (the only input). <span id="verified"></span></p>
+<script>
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const img = document.getElementById('fb'), stat = document.getElementById('status');
+  const ver = document.getElementById('verified');
+  let loading = false;
+  img.onload = img.onerror = () => { loading = false; };
+  setInterval(() => { if (!loading) { loading = true; img.src = 'frame.png?t=' + Date.now(); } }, 80);
+
+  function post(path, obj) {
+    fetch(path, { method:'POST', headers:{'Content-Type':'application/json', 'X-Token':token},
+                  body:JSON.stringify(obj), keepalive:true }).catch(() => {});
+  }
+  let mask = 0, mode = 'demo';
+  const btnDemo = document.getElementById('btn-demo'), btnManual = document.getElementById('btn-manual');
+  function show() {
+    btnDemo.classList.toggle('active', mode === 'demo');
+    btnManual.classList.toggle('active', mode === 'manual');
+    btnDemo.textContent = mode === 'demo' ? 'Autopilot: ON' : 'Autopilot';
+    btnManual.textContent = mode === 'manual' ? 'You have control' : 'Take control';
+  }
+  function setMode(m) {
+    mode = m; show();
+    if (m === 'demo') { mask = 0; document.querySelectorAll('button[data-bit]').forEach(b => b.classList.remove('active')); }
+    post('/api/mode', { mode:m });
+  }
+  function setBit(bit, on) {
+    const before = mask;
+    mask = on ? (mask | (1 << bit)) : (mask & ~(1 << bit));
+    document.querySelectorAll('button[data-bit="' + bit + '"]').forEach(b => b.classList.toggle('active', !!on));
+    if (mask !== before && mode === 'manual') post('/api/keys', { mask });
+  }
+  btnDemo.addEventListener('click', () => setMode('demo'));
+  btnManual.addEventListener('click', () => setMode('manual'));
+  document.querySelectorAll('button[data-bit]').forEach(b => {
+    const bit = +b.dataset.bit;
+    b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId);
+      if (mode !== 'manual') setMode('manual'); setBit(bit, true); });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, () => setBit(bit, false)));
+  });
+  const keymap = { ArrowUp:0, KeyW:0, ArrowDown:1, KeyS:1, ArrowLeft:2, KeyA:2, ArrowRight:3, KeyD:3 };
+  addEventListener('keydown', e => {
+    if (e.code in keymap) { e.preventDefault(); if (!e.repeat) { if (mode !== 'manual') setMode('manual'); setBit(keymap[e.code], true); } }
+  });
+  addEventListener('keyup', e => { if (e.code in keymap) { e.preventDefault(); setBit(keymap[e.code], false); } });
+  addEventListener('blur', () => { for (let b = 0; b < 4; b++) setBit(b, false); });
+
+  async function poll() {
+    try {
+      const s = await (await fetch('api/status')).json();
+      stat.textContent = `frame ${s.frame} · ${s.tokens.toLocaleString()} tokens · ${s.tok_per_s} tok/s · ` +
+        `${s.fps} fps · ${s.typed} bytes typed` + (s.waiting ? ' (1 waiting)' : '') +
+        (s.error ? ' · STOPPED' : '');
+      if (s.verified === null) { ver.textContent = 'Not checked against lx.ref.'; ver.className = ''; }
+      else if (s.verified) { ver.textContent = 'Verified: every token matches lx.ref.'; ver.className = 'ok'; }
+      else { ver.textContent = 'Diverged from lx.ref at token ' + s.divergence.position + '.'; ver.className = 'bad'; }
+      if (s.mode !== mode) { mode = s.mode; show(); }
+    } catch (e) { stat.textContent = 'server unreachable'; }
+  }
+  setInterval(poll, 500); poll();
+</script>
+</body>
+</html>
