@@ -128,7 +128,8 @@ class AsmProbeVerification(unittest.TestCase):
                 self.assertNotIn('atomic', counts)
                 self.assertNotIn('system-or-csr', counts)
                 self.assertNotIn('floating-point', counts)
-                self.assertGreater(counts.get('sw', 0), 1000, 'generated column kernels should be SW-heavy')
+                self.assertEqual(counts.get('sw', 0), 15 * 64 + 1,
+                                 '64 generated kernels * 15 SW plus the frame-count commit')
 
     def test_exact_lx_tokens_and_instructions_per_frame_match_reference(self):
         for name in scenario_definitions():
@@ -185,8 +186,8 @@ class AsmProbeVerification(unittest.TestCase):
                 self.assertNotIn('divu', counts)
                 self.assertNotIn('rem', counts)
                 self.assertNotIn('remu', counts)
-                # 16 aligned SW per column * 96 columns plus the frame-count commit per frame.
-                self.assertEqual(counts.get('sw', 0), 4 * (16 * 96 + 1))
+                # 15 aligned SW per column * 96 columns plus the frame-count commit per frame.
+                self.assertEqual(counts.get('sw', 0), 4 * (15 * 96 + 1))
                 self.assertNotIn('sb', counts)
                 self.assertNotIn('sh', counts)
 

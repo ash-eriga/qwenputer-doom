@@ -3,30 +3,27 @@
 # The hot loop is shaped for the machine's token cost, not for a normal CPU:
 #   * no division in the frame loop (tables/code generation instead)
 #   * aligned SW only in the framebuffer hot path
-#   * X/Y ray state packed in one register; one ADD advances both axes
-#   * map256 lookup indexes the packed position directly
-#   * column drawing is a generated straight-line kernel per distance: 16 SW, no loop
+#   * ray state is one linear postab address; one ADD advances both axes
+#   * solid window edges make that single-ADD update safe without bounds checks
+#   * column drawing is a generated straight-line kernel per distance: 15 SW, no loop
 #
 # Keys match fastemu-lf: bit 0 up, 1 down, 2 left, 3 right.
 
     .equ W, 96
     .equ H, 60
     .equ STRIDE, 64
-    .equ GROUPS, 16              # 16 groups * 4 probes = 64 half-tile steps
+    .equ GROUPS, 16              # 16 groups * 4 probes = 64 ray steps
 
 #ifndef VISUAL
 #define VISUAL 0
 #endif
 #ifndef RAY_SHIFT
-#define RAY_SHIFT 4
+#define RAY_SHIFT 6             # 8.8 trig -> quarter-tile units; full step is one tile
 #endif
 
 .macro PROBE hitlabel
-    add s5, s5, s6              # packed x/y += packed dx/dy
-    srli t0, s5, 4              # xtile in low bits, ytile in bits 8+
-    and t0, t0, a1              # keep xtile + ytile*256
-    add t0, t0, a7              # map256 base (the costly high-address add)
-    lbu s10, 0(t0)
+    add s5, s5, s6              # postab address += dxsub + dysub*64
+    lbu s10, 0(s5)
     bne s10, zero, \hitlabel
 .endm
 
@@ -41,21 +38,25 @@ _start:
     la s11, map
     la a5, fb_cols
     la a6, camoff_tab
-    la a7, map256
+    la a7, postab
     la a0, colkern_base
     .option pop
 
-    li a1, 0x0f0f               # packed tile-index mask
-    # Doom palette indexes, replicated to four pixels per word:
-    # ceiling = 64 (tan brown), wall = 144/128 (brown/tan), floor = 96 (gray)
-    li a2, 0x40404040
-    li a3, 0x90909090
-    li a4, 0x60606060
+    # Real quantized E1M1 colors generated into render_words.  Keep all seven live in
+    # registers; generated column kernels use them directly and never reload colors.
+    la t0, render_words
+    lw a2, 0(t0)                # ceiling
+    lw a4, 4(t0)                # floor
+    lw a3, 8(t0)                # texture cluster 0
+    lw t3, 12(t0)               # texture cluster 1
+    lw t4, 16(t0)               # texture cluster 2
+    lw t5, 20(t0)               # texture cluster 3
+    lw t6, 24(t0)               # texture cluster 4
 
-    # Player at tile (2.5, 2.5), facing east. Positions are 4.4 fixed point.
-    li s0, 40                   # px (4.4 fixed: tile 2.5)
-    li s1, 40                   # py (4.4 fixed)
-    li s2, 0                    # angle, 0..255 (one turn)
+    # Player at the center of the extracted E1M1 window. Positions are quarter-tile units.
+    li s0, 34                   # px = 8.5 tiles * 4
+    li s1, 34                   # py = 8.5 tiles * 4
+    li s2, 64                   # Doom spawn angle 90deg, in 1/256-turn units
 
 main_loop:
     # ------------------------------------------------------------ input/movement
@@ -97,44 +98,44 @@ have_input:
     addi s2, s2, 3
     andi s2, s2, 255
 2:
-    # Movement vector for this frame: cos/sin in 8.8, shifted to 1/8 tile per frame.
+    # Movement vector for this frame: cos/sin in 8.8, shifted to quarter-tile units.
     slli t1, s2, 1
     add t2, tp, t1
     lh t2, 0(t2)
-    srai t3, t2, 6              # mx in 4.4 units (1/4 tile/frame max)
+    srai s7, t2, 8              # mx in quarter-tile units (1/4 tile/frame max)
     add t2, gp, t1
     lh t2, 0(t2)
-    srai t4, t2, 6              # my in 4.4 units
+    srai s8, t2, 8              # my in quarter-tile units
 
     andi t1, t0, 1              # up: forward
     beq t1, zero, 3f
-    add t5, s0, t3
-    add t6, s1, t4
+    add s9, s0, s7
+    add s10, s1, s8
     j 4f
 3:
     andi t1, t0, 2              # down: backward
     beq t1, zero, 5f
-    sub t5, s0, t3
-    sub t6, s1, t4
+    sub s9, s0, s7
+    sub s10, s1, s8
 4:
-    # Axis-separated collision against the byte map. x first:
-    srli t1, t5, 4
-    srli t2, s1, 4
+    # Axis-separated collision against the compact byte map. x first:
+    srli t1, s9, 2
+    srli t2, s1, 2
     slli t2, t2, 4
     add t1, t1, t2
     add t1, t1, s11
     lbu t2, 0(t1)
     bne t2, zero, 41f
-    mv s0, t5
+    mv s0, s9
 41:
-    srli t1, s0, 4
-    srli t2, t6, 4
+    srli t1, s0, 2
+    srli t2, s10, 2
     slli t2, t2, 4
     add t1, t1, t2
     add t1, t1, s11
     lbu t2, 0(t1)
     bne t2, zero, 5f
-    mv s1, t6
+    mv s1, s10
 5:
 
     # ------------------------------------------------------------ render one frame
@@ -149,19 +150,18 @@ column_loop:
 
     add t1, tp, t0
     lh t1, 0(t1)
-    srai s7, t1, RAY_SHIFT      # ray step x in 4.4 units
+    srai s7, t1, RAY_SHIFT      # ray step x in quarter-tile units
     add t1, gp, t0
     lh t1, 0(t1)
-    srai s8, t1, RAY_SHIFT      # ray step y
+    srai s8, t1, RAY_SHIFT      # ray step y in quarter-tile units
 
-    # Pack position and step as x | y<<8 in 4.4 fixed point. Coordinates stay below
-    # 256 units, so low-byte carries cannot leak into the y byte inside the map.
-    slli s5, s1, 8
-    or s5, s5, s0
-    slli t0, s7, 24
-    srli t0, t0, 24             # zero-extend signed dx into the low byte
-    slli t1, s8, 8
-    or s6, t0, t1
+    # postab is linear: xsub + ysub*64.  One combined signed delta therefore moves the
+    # direct table address in both axes with a single ADD per probe.
+    slli t1, s8, 6
+    add s6, s7, t1
+    slli s5, s1, 6
+    add s5, s5, s0
+    add s5, s5, a7
 
     li s9, GROUPS
 march_loop:
@@ -196,23 +196,13 @@ hit3:
     sub t0, t1, t0
 
 have_steps:
-    # t0 is now the distance case, 1..64. Column kernels encode ceiling/wall/floor
+    # t0 is now the distance case, 1..64. Column kernels encode ceiling/textured-wall/floor
     # for that case, so there is no span arithmetic and no drawing loop here.
     slli s4, s3, 6              # column base: x * 64
     add s4, s4, a5
 
-    # Cheap texture/shading probe: wall tint alternates by cell type and column parity.
-    li a3, 0x90909090
-    andi t1, s3, 1
-    or t1, t1, s10
-    andi t1, t1, 2
-    beq t1, zero, 6f
-    li a3, 0x80808080
-6:
-    # case stride is 80 bytes: case*80 = case*64 + case*16
-    slli t1, t0, 4
-    slli t2, t0, 6
-    add t1, t1, t2
+    # case stride is exactly 64 bytes: 15 aligned SW plus one jump
+    slli t1, t0, 6
     add t1, t1, a0
     jr t1
 
@@ -227,25 +217,25 @@ colkern_done:
     # fastemu-lf knows how to dump. This loop is deliberately excluded from cost builds.
     la t0, fb_cols
     la t1, fb_linear
-    li t2, 0                    # x
+    li s7, 0                    # x
 vis_x_loop:
-    li t3, 0                    # y
+    li s8, 0                    # y
 vis_y_loop:
-    slli t4, t2, 6
-    add t4, t4, t3
-    add t4, t4, t0
-    lbu t5, 0(t4)
-    li t4, W
-    mul t4, t3, t4
-    add t4, t4, t2
-    add t4, t4, t1
-    sb t5, 0(t4)
-    addi t3, t3, 1
-    li t4, H
-    blt t3, t4, vis_y_loop
-    addi t2, t2, 1
-    li t4, W
-    blt t2, t4, vis_x_loop
+    slli s9, s7, 6
+    add s9, s9, s8
+    add s9, s9, t0
+    lbu s10, 0(s9)
+    li s9, W
+    mul s9, s8, s9
+    add s9, s9, s7
+    add s9, s9, t1
+    sb s10, 0(s9)
+    addi s8, s8, 1
+    li s9, H
+    blt s8, s9, vis_y_loop
+    addi s7, s7, 1
+    li s9, W
+    blt s7, s9, vis_x_loop
 #endif
 
     # Commit the frame. fastemu-lf watches this exact store.
