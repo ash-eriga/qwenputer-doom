@@ -39,7 +39,7 @@ _start:
     la a5, fb_cols
     la a6, camoff_tab
     la a7, postab
-    la a0, colkern_base
+    la a0, colkern_base + 4160   # one past the maximum-distance kernel case
     la a1, raydelta_tab
     .option pop
 
@@ -155,48 +155,35 @@ column_loop:
     lh s6, 0(t1)                # combined dxsub + dysub*64
     mv s5, s8                   # player postab address
 
-    li s9, GROUPS
+    slli s4, s3, 6              # column base: x * 64
+    add s4, s4, a5
+    li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
 march_loop:
     PROBE hit0
     PROBE hit1
     PROBE hit2
     PROBE hit3
-    addi s9, s9, -1
+    addi s9, s9, -256
     bne s9, zero, march_loop
-    li t0, 64                   # miss: maximum-distance case
-    j have_steps
+    addi t0, a0, -64
+    jr t0                       # miss: maximum-distance case 64
 
-# steps = (16 - groups_left) * 4 + probe_index + 1 = 65 + probe_index - 4*groups_left
+# a0=colkern_base+4160 and s9=256*groups_left, so a0-s9 is exactly case hit0.
 hit0:
-    slli t0, s9, 2
-    li t1, 65
-    sub t0, t1, t0
-    j have_steps
+    sub t0, a0, s9
+    jr t0
 hit1:
-    slli t0, s9, 2
-    li t1, 66
-    sub t0, t1, t0
-    j have_steps
+    addi t0, s9, -64
+    sub t0, a0, t0
+    jr t0
 hit2:
-    slli t0, s9, 2
-    li t1, 67
-    sub t0, t1, t0
-    j have_steps
+    addi t0, s9, -128
+    sub t0, a0, t0
+    jr t0
 hit3:
-    slli t0, s9, 2
-    li t1, 68
-    sub t0, t1, t0
-
-have_steps:
-    # t0 is now the distance case, 1..64. Column kernels encode ceiling/textured-wall/floor
-    # for that case, so there is no span arithmetic and no drawing loop here.
-    slli s4, s3, 6              # column base: x * 64
-    add s4, s4, a5
-
-    # case stride is exactly 64 bytes: 15 aligned SW plus one jump
-    slli t1, t0, 6
-    add t1, t1, a0
-    jr t1
+    addi t0, s9, -192
+    sub t0, a0, t0
+    jr t0
 
     .globl colkern_done
 colkern_done:
