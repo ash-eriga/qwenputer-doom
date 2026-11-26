@@ -144,6 +144,7 @@ have_input:
     slli s8, s1, 6
     add s8, s8, s0
     add s8, s8, a7              # postab address of the player position
+    mv s4, a5                   # framebuffer column pointer, advanced by 64 per column
     li s3, 0                    # column x
 column_loop:
     # ray angle = player angle + camera offset[x], both pre-doubled byte offsets.
@@ -151,12 +152,10 @@ column_loop:
     lb t0, 0(t0)
     add t0, t0, s7
     andi t0, t0, 510
-    add t1, a1, t0
-    lh s6, 0(t1)                # combined dxsub + dysub*64
+    add t0, t0, a1
+    lh s6, 0(t0)                # combined dxsub + dysub*64
     mv s5, s8                   # player postab address
 
-    slli s4, s3, 6              # column base: x * 64
-    add s4, s4, a5
     li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
 march_loop:
     PROBE hit0
@@ -187,6 +186,7 @@ hit3:
 
     .globl colkern_done
 colkern_done:
+    addi s4, s4, 64
     addi s3, s3, 1
     li t0, W
     blt s3, t0, column_loop
