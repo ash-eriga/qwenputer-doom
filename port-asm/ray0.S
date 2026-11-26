@@ -145,12 +145,12 @@ have_input:
     slli s8, s1, 6
     add s8, s8, s0
     add s8, s8, a7              # postab address of the player position
-    mv s4, a5                   # framebuffer column pointer, advanced by 64 per column
-    li s3, 0                    # column x
+    la s4, fb_cols + 6080       # framebuffer column 95; walk backwards with the camera table
+    addi s3, a6, 95             # camera offset pointer for column 95
+    addi t2, a6, -1             # end sentinel
 column_loop:
     # ray angle = player angle + camera offset[x], both pre-doubled byte offsets.
-    add t0, a6, s3
-    lb t0, 0(t0)
+    lb t0, 0(s3)
     add t0, t0, s7
     lh s6, 0(t0)                # combined dxsub + dysub*64
     li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
@@ -188,10 +188,9 @@ hit3:
 
     .globl colkern_done
 colkern_done:
-    addi s4, s4, 64
-    addi s3, s3, 1
-    li t0, W
-    blt s3, t0, column_loop
+    addi s4, s4, -64
+    addi s3, s3, -1
+    bne s3, t2, column_loop
 
 #if VISUAL
     # Debug/visual builds only: transpose the column-major frame into the linear buffer
