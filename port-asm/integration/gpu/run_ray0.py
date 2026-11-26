@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import argparse
 import copy as copylib
+import gzip
+import hashlib
 import json
+import shutil
 import sys
 import time
 import unittest
@@ -101,6 +104,30 @@ def palette_for_run(args, work: Path) -> bytes | None:
     synthetic = work / "host-palette.wad"
     write_palette_wad(synthetic)
     return read_playpal(synthetic)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def materialize_packed(src: str, work: Path) -> tuple[Path, str]:
+    """Return a local packed.pt and its SHA-256, transparently decompressing packed.pt.gz."""
+    src_path = Path(src)
+    if src_path.name.endswith(".gz"):
+        packed = work / "packed.pt"
+        with gzip.open(src_path, "rb") as fi, open(packed, "wb") as fo:
+            shutil.copyfileobj(fi, fo, 1 << 20)
+        print(f"packed input {src_path} sha256={sha256_file(src_path)}", flush=True)
+        print(f"decompressed packed {packed} bytes={packed.stat().st_size}", flush=True)
+    else:
+        packed = src_path
+    digest = sha256_file(packed)
+    print(f"packed.pt sha256={digest}", flush=True)
+    return packed, digest
 
 
 def make_frame_capture(session, runtime, palette: bytes | None, outdir: Path, wanted: set[int]):
@@ -312,6 +339,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--checkpoint-every", type=int, default=2_000_000)
     ap.add_argument("--progress-rounds", type=int, default=100)
     ap.add_argument("--progress-chunks", type=int, default=8)
+    ap.add_argument("--expect-packed-sha256", default=None,
+                    help="required SHA-256 of the materialized packed.pt")
+    ap.add_argument("--load-only", action="store_true",
+                    help="load the packed circuit and exit before token execution")
     ap.add_argument("--print-config", action="store_true", help="print ELF-derived config and exit")
     ap.add_argument("--self-test", action="store_true", help="run CPU-only causality tests and exit")
     return ap
@@ -338,10 +369,23 @@ def main(argv: list[str] | None = None) -> int:
 
     from packed_model import load_checkpoint, load_packed_runtime, make_session
 
-    runtime = load_packed_runtime(args.elf, args.packed, args.lxsrc, chunk=args.chunk,
+    packed, packed_sha256 = materialize_packed(args.packed, work)
+    if args.expect_packed_sha256 and packed_sha256 != args.expect_packed_sha256.lower():
+        raise SystemExit(f"packed.pt sha256 mismatch: got {packed_sha256}, "
+                         f"expected {args.expect_packed_sha256.lower()}")
+    runtime = load_packed_runtime(args.elf, packed, args.lxsrc, chunk=args.chunk,
                                   device=args.device, compile_fast=not args.no_compile,
                                   head_block=args.head_block, head_vblock=args.head_vblock,
                                   fp32_head=args.fp32_head)
+    if args.load_only:
+        print(json.dumps({"mode": "load-only", "device": args.device,
+                          "packed_sha256": packed_sha256,
+                          "load_seconds": round(runtime.load_seconds, 3),
+                          "circuit_layers": runtime.c.n_layers(),
+                          "packed_layers": runtime.fast.n_chip,
+                          "head_columns": int(runtime.fast.head_cols.numel())},
+                         indent=2, sort_keys=True), flush=True)
+        return 0
     args._resume_history = None
     args._resume_pos = None
     args._resume_stats = None
