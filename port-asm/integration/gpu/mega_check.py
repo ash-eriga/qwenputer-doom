@@ -237,7 +237,7 @@ def parse_keys(text: str) -> list[tuple[int, int]]:
 
 
 def play(rt, mg, a) -> None:
-    from asm_readout import read_playpal, write_palette_wad
+    from asm_readout import host_palette
     from mega_play import MegaGame
 
     sess = make_session(rt, 1)
@@ -247,8 +247,7 @@ def play(rt, mg, a) -> None:
     if a.png_dir:
         out = Path(a.png_dir)
         out.mkdir(parents=True, exist_ok=True)
-        pal = read_playpal(a.wad) if a.wad else read_playpal(write_palette_wad(
-            out / "host-palette.wad"))
+        pal = host_palette(a.wad)
     game = MegaGame(rt, sess, mg, check=True, palette=pal)
     keys = parse_keys(a.keys)
     typed = []

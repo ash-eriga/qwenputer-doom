@@ -202,7 +202,7 @@ def main(argv=None) -> int:
     add_lxsrc(a.lxsrc)
     import torch
 
-    from asm_readout import read_playpal, write_palette_wad
+    from asm_readout import host_palette
     from mega_play import CpuMega, MegaGame
 
     torch.set_grad_enabled(False)
@@ -217,13 +217,7 @@ def main(argv=None) -> int:
         print(json.dumps({"mega_build_s": round(time.time() - t0, 1), **mg.stats}), flush=True)
     else:
         mg = CpuMega(rt, sess.cache)
-    if a.wad:
-        pal = read_playpal(a.wad)
-    else:
-        import tempfile
-
-        pal = read_playpal(write_palette_wad(Path(tempfile.mkdtemp()) / "palette.wad"))
-    game = MegaGame(rt, sess, mg, check=not a.no_check, palette=pal)
+    game = MegaGame(rt, sess, mg, check=not a.no_check, palette=host_palette(a.wad))
     live = Live(game, a.chunk, a.scale, a.max_tokens)
     th = threading.Thread(target=live.loop, daemon=True)
     th.start()

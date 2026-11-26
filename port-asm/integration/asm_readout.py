@@ -14,6 +14,7 @@ import struct
 from pathlib import Path
 
 RAM_BASE = 0x80000000
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def column_major_to_rows(data: bytes | bytearray, width: int, height: int, stride: int) -> bytes:
@@ -131,6 +132,27 @@ def write_palette_wad(path: str | Path, palette: bytes | None = None) -> Path:
     directory = struct.pack("<II8s", 12, len(palette), b"PLAYPAL\0")
     path.write_bytes(header + palette + directory)
     return path
+
+
+# Where a PLAYPAL is looked for when none is given: the WAD the tables are built from, then the
+# palette-only WAD setup_gpu.sh fetches.
+PALETTE_WADS = (ROOT / "build" / "doom1.wad", ROOT / "build" / "gpu" / "playpal.wad")
+
+
+def host_palette(wad: str | Path | None = None) -> bytes:
+    """The display palette: wad's PLAYPAL, else the first of PALETTE_WADS present, else the
+    write_palette_wad ramp (not Doom's colours; a warning says so)."""
+    if wad:
+        return read_playpal(wad)
+    for p in PALETTE_WADS:
+        if p.is_file():
+            return read_playpal(p)
+    import sys
+    import tempfile
+
+    print("no PLAYPAL found (--wad, or " + ", ".join(map(str, PALETTE_WADS)) + "): frames use "
+          "a stand-in green ramp, not Doom's colours", file=sys.stderr)
+    return read_playpal(write_palette_wad(Path(tempfile.mkdtemp()) / "palette.wad"))
 
 
 def load_config(path_or_elf) -> dict:

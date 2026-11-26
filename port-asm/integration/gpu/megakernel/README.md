@@ -70,8 +70,20 @@ base.
 - `mega_live.py`'s server and page with a stand-in game in a browser: the frame, the status,
   the token check, and a key tapped within one launch still typed (0, 1, 0, then 0x80 for the
   autopilot).
-- Nothing has run on a GPU yet: the kernel's speed and its exactness on the device are what the
-  L4 run measures.
+
+## What was checked on an L4
+
+`setup_gpu.sh` on a fresh Colab L4 (driver 580.82.07, torch 2.11.0+cu130, nvcc 13 from pip),
+then `mega_check.py --skip-math`:
+
+- `build`: 58 CTAs, 101,344 bytes of shared memory each, 2.15 MB of 4.73 MB in global memory,
+  built in 10.5 s, 5.48 GiB peak.
+- `stock`: 2,000 tokens identical to lx.fast's decode and to lx.ref; the stock decode runs at
+  187 tok/s, the megakernel at 3,812.
+- `play`: 60,000 tokens (116 frames) with four bytes typed, every token checked against lx.ref,
+  verified; 15 frames read out of the model's state equal lx.ref's framebuffer. 3,847 tok/s in
+  the kernel, 3,733 tok/s and 7.2 frames/s wall clock.
+- Not run yet: the `math` step (skipped), the long run, and `--no-spec`.
 
 ## On the L4
 
@@ -95,7 +107,9 @@ bash port-asm/integration/gpu/setup_gpu.sh     # --no-check: set up only
 - **assets**: the release
   [`ray0-gpu-assets-v1`](https://github.com/ash-eriga/qwenputer-doom/releases/tag/ray0-gpu-assets-v1),
   checked against its `SHA256SUMS`: `packed.pt` (the 14-layer build, 4.2 GB, decompressed into
-  `build/gpu`) and `build/asm-ray0-small.elf` (built with `build/doom1.wad`, so E1M1). An ELF
+  `build/gpu`), `build/asm-ray0-small.elf` (built with `build/doom1.wad`, so E1M1) and
+  `build/gpu/playpal.wad` (Doom's palette; without it or `build/doom1.wad` the frames come out
+  in a stand-in green ramp). An ELF
   already in `build/` is kept. `packed.pt` does not depend on the ELF's contents, only on its
   32 KiB layout, so `bash port-asm/build.sh` there (riscv64-unknown-elf-gcc) also works.
 

@@ -13,8 +13,9 @@
 #           redistributable archives in $WORK)
 #   lxsrc   ../Doom-On-Qwen/lxsrc: Doom-On-Qwen cloned beside this checkout, then its
 #           make_lxsrc.sh (linuxformer at the commit Doom-On-Qwen pins)
-#   assets  the release ray0-gpu-assets-v1: packed.pt (decompressed into $WORK) and
-#           build/asm-ray0-small.elf, both checked against SHA256SUMS
+#   assets  the release ray0-gpu-assets-v1: packed.pt (decompressed into $WORK),
+#           build/asm-ray0-small.elf and $WORK/playpal.wad (Doom's palette, for the frames'
+#           colours), all checked against SHA256SUMS
 #
 # Environment: WORK (default <repo>/build/gpu), PYTHON (default python3), CUDA_FLAVOR (cu130 or
 # cu128; default from the driver), STEPS (default "python lxsrc assets").
@@ -56,8 +57,9 @@ step_python() {
             if command -v apt-get >/dev/null; then
                 local sudo=""
                 [ "$(id -u)" = 0 ] || sudo="sudo -n"
-                $sudo apt-get install -y -q "python$v-venv" >/dev/null \
-                    || { $sudo apt-get update -q >/dev/null && $sudo apt-get install -y -q "python$v-venv" >/dev/null; }
+                # update first: a stale package index 404s on the .deb
+                $sudo apt-get update -q >/dev/null 2>&1 || true
+                $sudo apt-get install -y -q "python$v-venv" >/dev/null
             fi
             rm -rf "$VENV"
             "$PYTHON" -m venv "$VENV" || { echo "cannot create a virtualenv: install python$v-venv" >&2; exit 1; }
@@ -136,8 +138,9 @@ step_lxsrc() {
 step_assets() {
     say "assets in $WORK"
     cd "$WORK"
-    curl -fsSL -o SHA256SUMS "$RELEASE/SHA256SUMS"
-    for f in packed.pt.gz asm-ray0-small.elf; do
+    # the query string skips a stale cached copy after the release's assets change
+    curl -fsSL -o SHA256SUMS "$RELEASE/SHA256SUMS?t=$(date +%s)"
+    for f in packed.pt.gz asm-ray0-small.elf playpal.wad; do
         if [ ! -f "$f" ] || ! grep " $f\$" SHA256SUMS | sha256sum -c --status; then
             echo "downloading $f"
             curl -fsSL --retry 3 -o "$f" "$RELEASE/$f"
@@ -165,7 +168,7 @@ done
 
 if [ -f "$WORK/env.sh" ]; then . "$WORK/env.sh"; fi
 CMD=("$VENV/bin/python" port-asm/integration/gpu/mega_check.py --packed "$WORK/packed.pt"
-     --png-dir "$WORK/frames" --out "$WORK/mega-check.json")
+     --wad "$WORK/playpal.wad" --png-dir "$WORK/frames" --out "$WORK/mega-check.json")
 if [ "$CHECK" = 1 ]; then
     say "validation: ${CMD[*]}"
     cd "$REPO"
@@ -175,5 +178,5 @@ else
     say "ready"
     if [ -f "$WORK/env.sh" ]; then echo ". $WORK/env.sh"; fi
     echo "${CMD[*]}"
-    echo "$VENV/bin/python port-asm/integration/gpu/mega_live.py --packed $WORK/packed.pt --token \$(openssl rand -hex 8)"
+    echo "$VENV/bin/python port-asm/integration/gpu/mega_live.py --packed $WORK/packed.pt --wad $WORK/playpal.wad --token \$(openssl rand -hex 8)"
 fi
