@@ -75,44 +75,48 @@ base.
 
 ## On the L4
 
-The stack is the one the Doom-On-Qwen runs pin: torch 2.11, transformers 5.22,
-flash-linear-attention 0.5.2, Python 3.11 or newer. nvcc must have torch's CUDA major version.
+One command on a fresh VM sets everything up and runs the validation, nothing to copy by hand:
 
 ```sh
-nvidia-smi --query-gpu=name,driver_version --format=csv   # driver >= 580: CUDA 13 works
-# CUDA 13 (driver >= 580): nvcc comes from a pip wheel, nothing else to install
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
-pip install nvidia-cuda-nvcc                       # nvidia/cu13/bin/nvcc, found automatically
-# CUDA 12 (older driver): torch for CUDA 12 and a system CUDA 12 toolkit
-#   pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-#   export LX_CUDA_HOME=/usr/local/cuda            # CUDA 12's pip wheel has no nvcc
-pip install transformers==5.22 fla-core==0.5.2 flash-linear-attention==0.5.2 accelerate safetensors
-pip install --no-deps torchcodec                   # transformers 5.22 reads its metadata
+git clone https://github.com/ash-eriga/qwenputer-doom && cd qwenputer-doom
+git checkout asm-renderer-cost
+bash port-asm/integration/gpu/setup_gpu.sh     # --no-check: set up only
 ```
 
-`packed.pt` is the 14-layer build (4.2 GB; `run_ray0.py` can decompress `packed.pt.gz`). The
-ELF is `build/asm-ray0-small.elf` (`--elf` to point elsewhere): copy it over, or build it there
-with `bash port-asm/build.sh` (riscv64-unknown-elf-gcc; with `build/doom1.wad` present the
-tables come from E1M1, without it from a synthetic map, which changes the picture and the
-`verify/` baselines but not the checks below: lx.ref runs the same ELF). `packed.pt` does not
-depend on the ELF's contents, only on its 32 KiB layout. Then,
-in order (each step prints one JSON line and stops the run at the first failure):
+`setup_gpu.sh` (each step skips what is already there):
+
+- **python**: a virtualenv in `build/gpu/venv` with the stack the Doom-On-Qwen runs pin
+  (torch 2.11, transformers 5.22, flash-linear-attention 0.5.2, Python 3.11 or newer) and an
+  nvcc of torch's CUDA version. With a driver >= 580 that is torch for CUDA 13 and nvcc from pip
+  wheels; with an older driver torch for CUDA 12.8 and the system CUDA 12 toolkit, else NVIDIA's
+  redistributable archives (written to `build/gpu/env.sh` as `LX_CUDA_HOME`).
+- **lxsrc**: `../Doom-On-Qwen/lxsrc`, from a clone of Doom-On-Qwen beside this checkout and its
+  `make_lxsrc.sh` (linuxformer at the commit Doom-On-Qwen pins).
+- **assets**: the release
+  [`ray0-gpu-assets-v1`](https://github.com/ash-eriga/qwenputer-doom/releases/tag/ray0-gpu-assets-v1),
+  checked against its `SHA256SUMS`: `packed.pt` (the 14-layer build, 4.2 GB, decompressed into
+  `build/gpu`) and `build/asm-ray0-small.elf` (built with `build/doom1.wad`, so E1M1). An ELF
+  already in `build/` is kept. `packed.pt` does not depend on the ELF's contents, only on its
+  32 KiB layout, so `bash port-asm/build.sh` there (riscv64-unknown-elf-gcc) also works.
+
+Then it runs step 1 below. The other steps, from the repository root:
 
 ```sh
-cd qwenputer-doom
-P=/path/packed.pt
+PY=build/gpu/venv/bin/python P=build/gpu/packed.pt
+[ -f build/gpu/env.sh ] && . build/gpu/env.sh
 # 1. env, math (bit for bit against torch and fla), build, megakernel vs lx.fast's decode vs
 #    lx.ref (2,000 tokens), then 60,000 tokens of play with typed keys, every token checked
-python port-asm/integration/gpu/mega_check.py --packed $P --png-dir /tmp/mega-frames \
-    --out /tmp/mega-check.json
+$PY port-asm/integration/gpu/mega_check.py --packed $P --png-dir build/gpu/frames \
+    --out build/gpu/mega-check.json
 # 2. a long free run at full speed (launches of 64k tokens)
-python port-asm/integration/gpu/mega_check.py --packed $P --skip-math --stock 0 \
-    --tokens 2000000 --every 65536 --keys 3:128 --out /tmp/mega-long.json
+$PY port-asm/integration/gpu/mega_check.py --packed $P --skip-math --stock 0 \
+    --tokens 2000000 --every 65536 --keys 3:128 --out build/gpu/mega-long.json
 # 3. the pairing off, to compare speed (same tokens)
-python port-asm/integration/gpu/mega_check.py --packed $P --skip-math --stock 0 --no-spec \
-    --tokens 200000 --every 65536 --out /tmp/mega-nospec.json
+$PY port-asm/integration/gpu/mega_check.py --packed $P --skip-math --stock 0 --no-spec \
+    --tokens 200000 --every 65536 --out build/gpu/mega-nospec.json
 ```
 
+Each step prints one JSON line and stops the run at the first failure.
 What to look at: `math` all zero, `build.smem` and `build.res_global` (how much stays in global
 memory), `stock.first_difference_vs_ref` null, `play.verified` true with
 `inputs_checked == tokens`, and `play.tok_per_s_kernel`. A frame costs 491 tokens on average
@@ -125,7 +129,7 @@ checks the packing, and `mega_check.py --ncta N` changes the CTA count.
 ## Playing live
 
 ```sh
-python port-asm/integration/gpu/mega_live.py --packed $P --port 8950 --token "$(openssl rand -hex 8)"
+$PY port-asm/integration/gpu/mega_live.py --packed $P --port 8950 --token "$(openssl rand -hex 8)"
 cloudflared tunnel --url http://localhost:8950     # open the printed URL with ?token=...
 ```
 
