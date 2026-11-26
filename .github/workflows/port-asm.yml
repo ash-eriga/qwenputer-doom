@@ -1,0 +1,45 @@
+name: port-asm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-riscv64-unknown-elf gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf
+
+      - name: Build assembly cost probes
+        run: bash port-asm/build.sh
+
+      - name: Reject division in the assembly hot path
+        run: |
+          if riscv64-unknown-elf-objdump -d build/asm-ray0-full.elf | grep -E '\b(div|divu|rem|remu)\b'; then
+            echo 'division/remainder instruction found in asm-ray0-full.elf' >&2
+            exit 1
+          fi
+
+      - name: Measure cost ceilings
+        run: |
+          python3 port-asm/measure_ray.py build/asm-ray0-full.elf 20 | tee /tmp/full.txt
+          python3 port-asm/measure_ray.py build/asm-ray0-half.elf 20 | tee /tmp/half.txt
+          python3 - <<'PY'
+          import re
+          def tokens_per_frame(path):
+              text = open(path).read()
+              m = re.search(r'tokens/frame~=([0-9.]+)', text)
+              assert m, text
+              return float(m.group(1))
+          full = tokens_per_frame('/tmp/full.txt')
+          half = tokens_per_frame('/tmp/half.txt')
+          print(f'full={full:.1f} tokens/frame half={half:.1f} tokens/frame')
+          assert full < 15000, full
+          assert half < 25000, half
+          PY
