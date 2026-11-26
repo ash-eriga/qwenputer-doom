@@ -153,15 +153,18 @@ column_loop:
     lb t0, 0(t0)
     add t0, t0, s7
     lh s6, 0(t0)                # combined dxsub + dysub*64
-    mv s5, s8                   # player postab address
-
     li s9, 4096                 # 16 march groups, pre-scaled by 256 bytes
+
+    # Peel probe 1: it can start from the player address directly, so no copy is needed.
+    add s5, s8, s6
+    lbu s10, 0(s5)
+    bne s10, zero, hit0
 march_loop:
-    PROBE hit0
     PROBE hit1
     PROBE hit2
     PROBE hit3
     addi s9, s9, -256
+    PROBE hit0
     bne s9, zero, march_loop
     addi t0, a0, -64
     jr t0                       # miss: maximum-distance case 64
