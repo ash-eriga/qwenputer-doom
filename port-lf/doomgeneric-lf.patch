@@ -97,25 +97,70 @@ index b8962cc..851807f 100644
  
  #if ORIGCODE
      DEH_Checksum(connect_data->deh_sha1sum);
+diff --git a/doomgeneric/doomdef.h b/doomgeneric/doomdef.h
+index 62d729d..e929199 100644
+--- a/doomgeneric/doomdef.h
++++ b/doomgeneric/doomdef.h
+@@ -39,7 +39,13 @@
+ 
+ // If rangecheck is undefined,
+ // most parameter validation debugging code will not be compiled
+-#define RANGECHECK
++//
++// Port change: Doom's release build leaves this off, and this guest pays a token for every
++// instruction of validation on the hottest path (R_MapPlane's "x2 < x1 || x1 < 0 ..." check
++// runs once per span, R_DrawPlanes' overflow checks once per frame). It only changes what
++// happens on invalid input -- an I_Error instead of a drawing overrun -- never a pixel, so the
++// shipped build matches vanilla's release configuration. -DRANGECHECK brings it back.
++//#define RANGECHECK
+ 
+ // The maximum number of players, multiplayer/networking.
+ #define MAXPLAYERS 4
+diff --git a/doomgeneric/doomgeneric.c b/doomgeneric/doomgeneric.c
+index 881d700..9656e25 100644
+--- a/doomgeneric/doomgeneric.c
++++ b/doomgeneric/doomgeneric.c
+@@ -18,7 +18,15 @@ void doomgeneric_Create(int argc, char **argv)
+ 
+ 	M_FindResponseFile();
+ 
++#ifdef DG_NO_SCREEN_MALLOC
++	// Port change for the LX builds: i_video.c points DG_ScreenBuffer at the engine's own
++	// render buffer (DG_SCREEN_IS_VIDEOBUFFER), so this allocation only reserves 4 bytes per
++	// pixel that nothing ever draws into -- 92 KB at 192x120, and the circuit's layer count
++	// scales with the RAM size, so the guest cannot afford it.
++	DG_ScreenBuffer = NULL;
++#else
+ 	DG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);
++#endif
+ 
+ 	DG_Init();
+ 
 diff --git a/doomgeneric/i_video.c b/doomgeneric/i_video.c
-index 84bebde..d5e778e 100644
+index 84bebde..e9e5236 100644
 --- a/doomgeneric/i_video.c
 +++ b/doomgeneric/i_video.c
-@@ -289,6 +289,13 @@ void I_InitGraphics (void)
+@@ -288,6 +288,19 @@ void I_InitGraphics (void)
+ 
      /* Allocate screen to draw to */
  	I_VideoBuffer = (byte*)Z_Malloc (SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);  // For DOOM to draw on
- 
++    // Port change: the zone does not clear what it hands out, and the renderer never draws
++    // every pixel of every frame (the horizon row is one such gap).  Anything that reads the
++    // framebuffer - the fuzz effect does, `colormaps[6*256 + dest[+-1]]` - would otherwise see
++    // whatever the previous zone block left there, which makes frames depend on allocator
++    // history.  Start from a known screen instead.
++    memset (I_VideoBuffer, 0, SCREENWIDTH * SCREENHEIGHT);
++
 +#ifdef DG_SCREEN_IS_VIDEOBUFFER
 +    /* Port change for the in-weights machines: there is no display memory separate from the
 +       engine's render buffer, so point the screen at it and I_FinishUpdate skips its blit.
 +       The blit was ~60% of a frame's instructions (64000 byte stores per frame). */
 +    DG_ScreenBuffer = I_VideoBuffer;
 +#endif
-+
+ 
  	screenvisible = true;
  
-     extern void I_InitInput(void);
-@@ -337,6 +344,11 @@ void I_FinishUpdate (void)
+@@ -337,6 +350,11 @@ void I_FinishUpdate (void)
      line_in  = (unsigned char *) I_VideoBuffer;
      line_out = (unsigned char *) DG_ScreenBuffer;
  
@@ -127,7 +172,7 @@ index 84bebde..d5e778e 100644
      y = SCREENHEIGHT;
  
      while (y--)
-@@ -366,6 +378,9 @@ void I_FinishUpdate (void)
+@@ -366,6 +384,9 @@ void I_FinishUpdate (void)
          line_in += SCREENWIDTH;
      }
  
@@ -165,6 +210,94 @@ index c8565f4..cec22bb 100644
  
  // Screen width used for "squash" scale functions
  
+diff --git a/doomgeneric/m_fixed.c b/doomgeneric/m_fixed.c
+index 23f6ff3..9a1492d 100644
+--- a/doomgeneric/m_fixed.c
++++ b/doomgeneric/m_fixed.c
+@@ -27,9 +27,9 @@
+ 
+ 
+ 
+-
+ // Fixme. __USE_C_FIXED__ or something.
+ 
++#ifndef LF_FIXED_ASM
+ fixed_t
+ FixedMul
+ ( fixed_t	a,
+@@ -37,6 +37,7 @@ FixedMul
+ {
+     return ((int64_t) a * (int64_t) b) >> FRACBITS;
+ }
++#endif
+ 
+ 
+ 
+@@ -52,11 +53,28 @@ fixed_t FixedDiv(fixed_t a, fixed_t b)
+     }
+     else
+     {
+-	int64_t result;
+-
+-	result = ((int64_t) a << 16) / b;
+-
+-	return (fixed_t) result;
++	// Port change: the renderer calls this a few dozen times per frame (R_ScaleFromGlobalAngle,
++	// SlopeDiv, P_*).  The 64-bit division below becomes __divdi3, a software loop of a hundred
++	// instructions that the LX machine pays a token for every step of.  When |a| < 2^15 the
++	// shift cannot overflow a 32-bit int, so the hardware 32-bit divider gives the identical
++	// quotient -- and both operands of a wall projection are in that range in practice.
++	//
++	// Measured, so not obvious: the remaining wide case does NOT want hand-written assembly.
++	// An exact RV32IM version of it (two hardware divides to split off the integer part, then
++	// 16 shift-subtract steps for the 16 fraction bits, pixel-identical on frames 6/10/60/150)
++	// costs 165 tokens per call where libgcc's __divdi3 -- which normalizes the operands first
++	// and leaves its loop early -- costs 100, i.e. 5.8k more tokens per frame.  libgcc stays.
++	if (a > -0x8000 && a < 0x8000)
++	{
++	    return (fixed_t) (((int32_t) a << 16) / b);
++	}
++	else
++	{
++	    int64_t result;
++
++	    result = ((int64_t) a << 16) / b;
++
++	    return (fixed_t) result;
++	}
+     }
+ }
+-
+diff --git a/doomgeneric/m_fixed.h b/doomgeneric/m_fixed.h
+index 733b290..2513e99 100644
+--- a/doomgeneric/m_fixed.h
++++ b/doomgeneric/m_fixed.h
+@@ -31,7 +31,25 @@
+ 
+ typedef int fixed_t;
+ 
++#ifdef LF_FIXED_ASM
++// FixedMul is a leaf the renderer calls a few dozen times per column and span. Inlining the
++// RV32M multiply (see m_fixed.c) removes the call and return records the LX machine pays for,
++// and lets gcc fold the surrounding shift. Definition lives here, not in m_fixed.c, for that
++// reason; -DLF_FIXED_ASM is only set by port-lf/build_fast.sh.
++#include <stdint.h>
++static inline __attribute__((always_inline))
++fixed_t FixedMul (fixed_t a, fixed_t b)
++{
++    uint32_t lo, hi;
++    __asm__ ("mul  %0, %2, %3\n\t"
++             "mulh %1, %2, %3"
++             : "=&r" (lo), "=&r" (hi)
++             : "r" ((uint32_t) a), "r" ((uint32_t) b));
++    return (fixed_t) ((lo >> FRACBITS) | (hi << (32 - FRACBITS)));
++}
++#else
+ fixed_t FixedMul	(fixed_t a, fixed_t b);
++#endif
+ fixed_t FixedDiv	(fixed_t a, fixed_t b);
+ 
+ 
 diff --git a/doomgeneric/m_menu.c b/doomgeneric/m_menu.c
 index 6df9655..0990e36 100644
 --- a/doomgeneric/m_menu.c
@@ -192,11 +325,322 @@ index 6df9655..0990e36 100644
  
  // temp for screenblocks (0-9)
  int			screenSize;
+diff --git a/doomgeneric/net_defs.h b/doomgeneric/net_defs.h
+index bedfb95..3c6210b 100644
+--- a/doomgeneric/net_defs.h
++++ b/doomgeneric/net_defs.h
+@@ -42,7 +42,10 @@
+ 
+ // Networking and tick handling related.
+ 
+-#define BACKUPTICS 128
++// Port change: 128 tics of input history is a netgame/demo-recording buffer (128 * 160 bytes
++// = 20 KB).  This guest is single player and runs exactly one tic per rendered frame, so only
++// the newest entry can ever be live; 8 keeps a wide margin and gives the LX image back 19 KB.
++#define BACKUPTICS 8
+ 
+ typedef struct _net_module_s net_module_t;
+ typedef struct _net_packet_s net_packet_t;
+diff --git a/doomgeneric/r_data.c b/doomgeneric/r_data.c
+index 2d4b65b..67e9006 100644
+--- a/doomgeneric/r_data.c
++++ b/doomgeneric/r_data.c
+@@ -401,6 +401,18 @@ R_GetColumn
+ }
+ 
+ 
++// Port change: the wall loop asks for one texture column per screen column, always for the
++// same texture, so it caches the per-texture column tables and the last patch base instead of
++// paying R_GetColumn's call record and W_CacheLumpNum hash lookup on every pixel.  Same
++// lookups as R_GetColumn above, so the same bytes come back.
++byte *R_GetCompositeBase (int tex)
++{
++    if (!texturecomposite[tex])
++	R_GenerateComposite (tex);
++    return texturecomposite[tex];
++}
++
++
+ static void GenerateTextureHashTable(void)
+ {
+     texture_t **rover;
+diff --git a/doomgeneric/r_data.h b/doomgeneric/r_data.h
+index 66425af..24fc541 100644
+--- a/doomgeneric/r_data.h
++++ b/doomgeneric/r_data.h
+@@ -31,6 +31,13 @@ R_GetColumn
+ ( int		tex,
+   int		col );
+ 
++// Per-texture column tables, exported for the wall loop's column cache (see r_segs.c).
++extern int*		texturewidthmask;
++extern short**		texturecolumnlump;
++extern unsigned short**	texturecolumnofs;
++extern byte**		texturecomposite;
++byte *R_GetCompositeBase (int tex);
++
+ 
+ // I/O, setting up the stuff.
+ void R_InitData (void);
+diff --git a/doomgeneric/r_draw.c b/doomgeneric/r_draw.c
+index 9271bcd..8f0c0c0 100644
+--- a/doomgeneric/r_draw.c
++++ b/doomgeneric/r_draw.c
+@@ -22,6 +22,49 @@
+ 
+ 
+ #include "doomdef.h"
++
++// Which of the four pixel loops port-lf/r_draw_asm.S supplies.  Each one can be built from
++// either implementation so a regression can be bisected to a single loop with
++// -DLF_ASM_SPAN=0 etc.; by default all four come from assembly.
++#ifndef R_DRAW_ASM_SPAN
++#define R_DRAW_ASM_SPAN 0
++#endif
++/* The low-detail span loop in assembly is ~2x faster than the C loop, but it changes a handful
++ * of pixels on the horizon row (14 of 4,000 at 80x50): that row is drawn by one-row wall slices,
++ * and whose texture column they read depends on state the span loop does not touch.  The
++ * difference is not understood well enough to ship, so the low-detail pair stays C by default
++ * and the assembly is opt-in (-DR_DRAW_ASM_SPANLOW=1). */
++#ifndef R_DRAW_ASM_SPANLOW
++#define R_DRAW_ASM_SPANLOW 0
++#endif
++#ifndef R_DRAW_ASM_COL
++#define R_DRAW_ASM_COL 0
++#endif
++#ifndef R_DRAW_ASM_COLLOW
++#define R_DRAW_ASM_COLLOW 0
++#endif
++#if R_DRAW_ASM_SPAN
++#define R_DRAW_ASM_SPAN_C 0
++#else
++#define R_DRAW_ASM_SPAN_C 1
++#endif
++#if R_DRAW_ASM_SPANLOW
++#define R_DRAW_ASM_SPANLOW_C 0
++#else
++#define R_DRAW_ASM_SPANLOW_C 1
++#endif
++#if R_DRAW_ASM_COL
++#define R_DRAW_ASM_COL_C 0
++#else
++#define R_DRAW_ASM_COL_C 1
++#endif
++#if R_DRAW_ASM_COLLOW
++#define R_DRAW_ASM_COLLOW_C 0
++#else
++#define R_DRAW_ASM_COLLOW_C 1
++#endif
++
++
+ #include "deh_main.h"
+ 
+ #include "i_system.h"
+@@ -99,6 +142,7 @@ int			dccount;
+ // Thus a special case loop for very fast rendering can
+ //  be used. It has also been used with Wolfenstein 3D.
+ // 
++#if R_DRAW_ASM_COL_C
+ void R_DrawColumn (void) 
+ { 
+     int			count; 
+@@ -143,6 +187,7 @@ void R_DrawColumn (void)
+ 	
+     } while (count--); 
+ } 
++#endif  /* R_DRAW_ASM */
+ 
+ 
+ 
+@@ -205,14 +250,16 @@ void R_DrawColumn (void)
+ #endif
+ 
+ 
++#if R_DRAW_ASM_COLLOW_C
+ void R_DrawColumnLow (void) 
+ { 
+     int			count; 
+     byte*		dest; 
+-    byte*		dest2;
+     fixed_t		frac;
+     fixed_t		fracstep;	 
+-    int                 x;
++    // Port change: keep the globals the loop reads every row in locals (see R_DrawSpanLow).
++    byte*		cmap = dc_colormap;
++    byte*		source = dc_source;
+  
+     count = dc_yh - dc_yl; 
+ 
+@@ -231,24 +278,25 @@ void R_DrawColumnLow (void)
+     //	dccount++; 
+ #endif 
+     // Blocky mode, need to multiply by 2.
+-    x = dc_x << 1;
+-    
+-    dest = ylookup[dc_yl] + columnofs[x];
+-    dest2 = ylookup[dc_yl] + columnofs[x+1];
++    dest = ylookup[dc_yl] + columnofs[dc_x << 1];
+     
+     fracstep = dc_iscale; 
+     frac = dc_texturemid + (dc_yl-centery)*fracstep;
+-    
++
+     do 
+     {
+ 	// Hack. Does not work corretly.
+-	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
++	{
++	    byte pixel = cmap[source[(frac>>FRACBITS)&127]];
++	    // Both halves of the doubled column pixel, in one halfword store.
++	    *(unsigned short *) dest = (unsigned short) (pixel | (pixel << 8));
++	}
+ 	dest += SCREENWIDTH;
+-	dest2 += SCREENWIDTH;
+ 	frac += fracstep; 
+ 
+     } while (count--);
+ }
++#endif  /* R_DRAW_ASM */
+ 
+ 
+ //
+@@ -587,6 +635,7 @@ int			dscount;
+ 
+ //
+ // Draws the actual span.
++#if R_DRAW_ASM_SPAN_C
+ void R_DrawSpan (void) 
+ { 
+     unsigned int position, step;
+@@ -637,6 +686,7 @@ void R_DrawSpan (void)
+ 
+     } while (count--);
+ }
++#endif  /* R_DRAW_ASM */
+ 
+ 
+ 
+@@ -716,13 +766,18 @@ void R_DrawSpan (void)
+ //
+ // Again..
+ //
++#if R_DRAW_ASM_SPANLOW_C
+ void R_DrawSpanLow (void)
+ {
+     unsigned int position, step;
+-    unsigned int xtemp, ytemp;
+     byte *dest;
+     int count;
+     int spot;
++    // Port change: ds_source/ds_colormap are globals, so with -Os the stock loop reloads both
++    // on every pixel.  Keeping them in locals is the same computation with a third of the
++    // loads/stores, and it is still plain C: same bytes, same order, same output.
++    byte *source = ds_source;
++    byte *cmap = ds_colormap;
+ 
+ #ifdef RANGECHECK
+     if (ds_x2 < ds_x1
+@@ -741,30 +796,31 @@ void R_DrawSpanLow (void)
+     step = ((ds_xstep << 10) & 0xffff0000)
+          | ((ds_ystep >> 6)  & 0x0000ffff);
+ 
+-    count = (ds_x2 - ds_x1);
+-
+     // Blocky mode, need to multiply by 2.
++    dest = ylookup[ds_y] + columnofs[ds_x1 << 1];
++    count = (ds_x2 - ds_x1) + 1;
++
+     ds_x1 <<= 1;
+     ds_x2 <<= 1;
+ 
+-    dest = ylookup[ds_y] + columnofs[ds_x1];
+-
+     do
+     {
+ 	// Calculate current texture index in u,v.
+-        ytemp = (position >> 4) & 0x0fc0;
+-        xtemp = (position >> 26);
+-        spot = xtemp | ytemp;
++	spot = ((position >> 4) & 0x0fc0) | (position >> 26);
+ 
+ 	// Lowres/blocky mode does it twice,
+-	//  while scale is adjusted appropriately.
+-	*dest++ = ds_colormap[ds_source[spot]];
+-	*dest++ = ds_colormap[ds_source[spot]];
+-
++	//  while scale is adjusted appropriately: one view pixel is two bytes.
++	{
++	    byte pixel = cmap[source[spot]];
++	    // One view pixel is two identical bytes; store them as one halfword (dest is even).
++	    *(unsigned short *) dest = (unsigned short) (pixel | (pixel << 8));
++	}
++	dest += 2;
+ 	position += step;
+ 
+-    } while (count--);
++    } while (--count);
+ }
++#endif  /* R_DRAW_ASM */
+ 
+ //
+ // R_InitBuffer 
+diff --git a/doomgeneric/r_draw.h b/doomgeneric/r_draw.h
+index 5b0c818..a4091a7 100644
+--- a/doomgeneric/r_draw.h
++++ b/doomgeneric/r_draw.h
+@@ -59,6 +59,11 @@ extern int		ds_y;
+ extern int		ds_x1;
+ extern int		ds_x2;
+ 
++// Framebuffer row and column bases (r_draw.c).  The register-argument span entry needs them
++// to turn (y, x1) into a destination pointer the same way R_DrawSpanLow does.
++extern byte*		ylookup[];
++extern int		columnofs[];
++
+ extern lighttable_t*	ds_colormap;
+ 
+ extern fixed_t		ds_xfrac;
+@@ -80,6 +85,23 @@ void 	R_DrawSpan (void);
+ // Low resolution mode, 160x200?
+ void 	R_DrawSpanLow (void);
+ 
++// Register-argument forms of the two low-detail loops (port-lf/r_draw_asm.S).  The callers
++// already have every parameter in hand, so they pass them in a0..a6 instead of round-tripping
++// them through the ds_* / dc_* globals, which on the LX machine costs two records per value.
++#ifdef R_DRAW_ASM_SPANLOW
++void	R_DrawSpanLowFast (byte *dest, int count, unsigned position, unsigned step,
++			   byte *source, lighttable_t *colormap);
++// Pre-shaded flat forms (port-lf/r_draw_asm.S): R_ShadedFlat in r_plane.c fills a 4096-byte
++// tile with cmap[source[i]], and the span loop then needs only one LBU per view pixel.
++void	R_DrawSpanLowShadedFast (byte *dest, int count, unsigned position, unsigned step,
++				 byte *shaded);
++void	R_FillShadedFlat (byte *dest, const byte *source, const byte *colormap);
++#endif
++#ifdef R_DRAW_ASM_COLLOW
++void	R_DrawColumnLowFast (int x, int yl, int yh, fixed_t iscale, fixed_t texturemid,
++			     byte *source, lighttable_t *colormap);
++#endif
++
+ 
+ void
+ R_InitBuffer
 diff --git a/doomgeneric/r_main.c b/doomgeneric/r_main.c
-index 22278fe..d4e2c85 100644
+index 22278fe..0aa3d16 100644
 --- a/doomgeneric/r_main.c
 +++ b/doomgeneric/r_main.c
-@@ -575,10 +575,13 @@ void R_InitTextureMapping (void)
+@@ -90,7 +90,10 @@ angle_t			clipangle;
+ // maps the visible view angles to screen X coordinates,
+ // flattening the arc to a flat projection plane.
+ // There will be many angles mapped to the same X. 
+-int			viewangletox[FINEANGLES/2];
++// Port change: the entries are screen columns (0..viewwidth, plus -1 as a marker), so a short
++// holds them and halves the table -- 8 KB of RAM the LX image cannot spare.  R_InitTables
++// writes exactly the same values.
++short			viewangletox[FINEANGLES/2];
+ 
+ // The xtoviewangleangle[] table maps a screen pixel
+ // to the lowest viewangle that maps back to x ranges
+@@ -575,10 +578,13 @@ void R_InitTextureMapping (void)
      // Scan viewangletox[] to generate xtoviewangle[]:
      //  xtoviewangle will give the smallest view angle
      //  that maps to x.	
@@ -212,7 +656,7 @@ index 22278fe..d4e2c85 100644
  	    i++;
  	xtoviewangle[x] = (i<<ANGLETOFINESHIFT)-ANG90;
      }
-@@ -586,9 +589,6 @@ void R_InitTextureMapping (void)
+@@ -586,9 +592,6 @@ void R_InitTextureMapping (void)
      // Take out the fencepost cases from viewangletox.
      for (i=0 ; i<FINEANGLES/2 ; i++)
      {
@@ -222,8 +666,708 @@ index 22278fe..d4e2c85 100644
  	if (viewangletox[i] == -1)
  	    viewangletox[i] = 0;
  	else if (viewangletox[i] == viewwidth+1)
+diff --git a/doomgeneric/r_plane.c b/doomgeneric/r_plane.c
+index ea1611c..3bf62c3 100644
+--- a/doomgeneric/r_plane.c
++++ b/doomgeneric/r_plane.c
+@@ -42,14 +42,26 @@ planefunction_t		ceilingfunc;
+ //
+ 
+ // Here comes the obnoxious "visplane".
+-#define MAXVISPLANES	128
++//
++// Port change for the LX builds: both tables are sized for the viewport this guest actually
++// renders rather than for 320 columns.  The circuit's layer count scales with the image, and
++// R_FindPlane/R_DrawPlanes still I_Error on overflow (they are checked unconditionally), so a
++// smaller table can only turn a silent overrun into a loud one.  MAXVISPLANES stays at twice
++// vanilla's planes-per-column density; MAXOPENINGS keeps vanilla's 64 per column exactly.
++#ifndef DG_DETAILLEVEL
++#define DG_DETAILLEVEL 0
++#endif
++#ifndef DG_MAXVISPLANES
++#define DG_MAXVISPLANES 64
++#endif
++#define MAXVISPLANES	DG_MAXVISPLANES
+ visplane_t		visplanes[MAXVISPLANES];
+ visplane_t*		lastvisplane;
+ visplane_t*		floorplane;
+ visplane_t*		ceilingplane;
+ 
+ // ?
+-#define MAXOPENINGS	SCREENWIDTH*64
++#define MAXOPENINGS	((SCREENWIDTH >> DG_DETAILLEVEL) * 64)
+ short			openings[MAXOPENINGS];
+ short*			lastopening;
+ 
+@@ -87,6 +99,111 @@ fixed_t			cachedystep[SCREENHEIGHT];
+ 
+ 
+ 
++//
++// Pre-shaded flat cache (DETAIL 1, port-lf assembly build)
++//
++// ds_source points straight into the memory-mapped WAD (port/w_file_qwenputer.c), so each
++// flat is a distinct, stable address; an animated flat (NUKAGE1..3) simply hands over a
++// different ds_source when flattranslation advances.  Keying a shaded 64x64 tile on
++// (ds_source, ds_colormap) is therefore exact for static and animated flats alike: there is
++// no flat number to go stale, only the two pointers the span loop would have used.
++//
++// A full 4096-byte tile costs ~24k LX tokens to fill, so the cache only admits spans wide
++// enough to repay it: measured on 160x100 E1M1, R_MapPlane draws one span per row and the
++// hot floor/ceiling rows are exactly viewwidth (80) pixels wide, while the short horizon
++// rows are a few pixels.  Admitting only full-width spans keeps the per-frame working set
++// at 9-11 (source, cmap) pairs and 15 distinct pairs over frames 100..151, so 16 slots hold
++// every hot pair and the steady state pays no fill at all; the short spans keep using
++// R_DrawSpanLowFast and never pay a fill.  Least-used replacement keeps the most reused
++// pairs resident if a scene ever offers more than sixteen.
++//
++// Memory: 16 x 4096 = 64 KiB of .bss.  It is paid for by trimming QWEN_ZONE_BYTES from
++// 0x45000 to 0x34000; the measured zone peak through frame 151 is 205,428 (0x32274).
++//
++#ifndef LF_SHADED_FLAT
++#define LF_SHADED_FLAT 1
++#endif
++#if defined(R_DRAW_ASM_SPANLOW) && LF_SHADED_FLAT
++#ifndef LF_FLAT_CACHE_SLOTS
++#define LF_FLAT_CACHE_SLOTS 16
++#endif
++#define LF_FLAT_BYTES 4096
++#ifndef LF_FLAT_MIN_PIXELS
++#define LF_FLAT_MIN_PIXELS (SCREENWIDTH >> DG_DETAILLEVEL)
++#endif
++// 4-way set associative, 4 sets.  The set index is a shift-xor of the flat pointer and the
++// colormap pointer; it was chosen so that all 15 (source, colormap) pairs that ever drive a
++// full-width span in the E1M1 autoplay map to sets of at most four, i.e. the cache holds
++// every one of them with no eviction.  A 16-way linear scan turned out to cost ~10k tokens
++// a frame in R_DrawPlanes; four ways cost ~2k.
++#define LF_FLAT_WAYS 4
++#define LF_FLAT_SETS (LF_FLAT_CACHE_SLOTS / LF_FLAT_WAYS)
++#define LF_FLAT_SET(source, cmap) \
++    (((((unsigned int) (source)) >> 13) ^ (((unsigned int) (cmap)) >> 8)) & (LF_FLAT_SETS - 1))
++
++static unsigned int lf_flat_buf[LF_FLAT_CACHE_SLOTS][LF_FLAT_BYTES / 4]
++    __attribute__((aligned(4)));
++static const byte *lf_flat_src[LF_FLAT_CACHE_SLOTS];
++static const byte *lf_flat_cmap[LF_FLAT_CACHE_SLOTS];
++static unsigned short lf_flat_use[LF_FLAT_CACHE_SLOTS];
++
++// One-entry front cache: consecutive plane rows sometimes share their (flat, colormap), and
++// a pointer compare is much cheaper than the set probe on the LX machine.
++static const byte *lf_last_src;
++static const byte *lf_last_cmap;
++static byte *lf_last_buf;
++
++// Out of line on purpose: inlining the set probe into R_DrawPlanes (which the compiler already
++// duplicates once per R_MakeSpans call site) tripled that function and made it spill loop state
++// to the stack, costing more than the probe itself.  As a leaf call it is two tokens plus the
++// probe, and its tokens show up on their own line in lx_profile.
++static __attribute__((noinline)) byte *R_ShadedFlat (const byte *source, const byte *cmap)
++{
++    byte *dst;
++    int base;
++    int i;
++    int victim;
++
++    if (source == lf_last_src && cmap == lf_last_cmap)
++	return lf_last_buf;
++
++    base = LF_FLAT_SET (source, cmap) * LF_FLAT_WAYS;
++    for (i = base; i < base + LF_FLAT_WAYS; i++)
++    {
++	if (lf_flat_src[i] == source && lf_flat_cmap[i] == cmap)
++	{
++	    if (lf_flat_use[i] != 0xffffu)
++		lf_flat_use[i]++;
++	    lf_last_src = source;
++	    lf_last_cmap = cmap;
++	    lf_last_buf = (byte *) lf_flat_buf[i];
++	    return lf_last_buf;
++	}
++    }
++
++    // Miss: fill the least-used way of this set (an empty way wins; its count is 0).  The new
++    // entry starts one above the victim's count so the next new pair does not evict it.
++    victim = base;
++    for (i = base + 1; i < base + LF_FLAT_WAYS; i++)
++	if (lf_flat_use[i] < lf_flat_use[victim])
++	    victim = i;
++
++    dst = (byte *) lf_flat_buf[victim];
++    R_FillShadedFlat (dst, source, cmap);
++    lf_flat_src[victim] = source;
++    lf_flat_cmap[victim] = cmap;
++    lf_flat_use[victim] = (lf_flat_use[victim] < 0xffffu)
++	? (unsigned short) (lf_flat_use[victim] + 1) : 0xffffu;
++
++    lf_last_src = source;
++    lf_last_cmap = cmap;
++    lf_last_buf = dst;
++    return dst;
++}
++#endif  /* R_DRAW_ASM_SPANLOW */
++
++
++
+ //
+ // R_InitPlanes
+ // Only at game startup.
+@@ -110,7 +227,10 @@ void R_InitPlanes (void)
+ //
+ // BASIC PRIMITIVE
+ //
+-void
++// Port change: static inline.  R_MakeSpans is its only caller and that is inlined into
++// R_DrawPlanes, so making it inline lets the compiler hoist the plane-invariant globals
++// (viewx/viewy/viewangle/planeheight/ds_source) out of the per-column loop.
++static inline __attribute__((always_inline)) void
+ R_MapPlane
+ ( int		y,
+   int		x1,
+@@ -119,6 +239,11 @@ R_MapPlane
+     angle_t	angle;
+     fixed_t	distance;
+     fixed_t	length;
++    fixed_t	xfrac;
++    fixed_t	yfrac;
++    fixed_t	xstep;
++    fixed_t	ystep;
++    lighttable_t *cmap;
+     unsigned	index;
+ 	
+ #ifdef RANGECHECK
+@@ -131,27 +256,29 @@ R_MapPlane
+     }
+ #endif
+ 
++    // Port change: the five values below used to be written to the ds_* globals and read back
++    // by R_DrawSpanLow.  They stay in locals here; only the non-assembly fallback stores them.
+     if (planeheight != cachedheight[y])
+     {
+ 	cachedheight[y] = planeheight;
+ 	distance = cacheddistance[y] = FixedMul (planeheight, yslope[y]);
+-	ds_xstep = cachedxstep[y] = FixedMul (distance,basexscale);
+-	ds_ystep = cachedystep[y] = FixedMul (distance,baseyscale);
++	xstep = cachedxstep[y] = FixedMul (distance,basexscale);
++	ystep = cachedystep[y] = FixedMul (distance,baseyscale);
+     }
+     else
+     {
+ 	distance = cacheddistance[y];
+-	ds_xstep = cachedxstep[y];
+-	ds_ystep = cachedystep[y];
++	xstep = cachedxstep[y];
++	ystep = cachedystep[y];
+     }
+ 	
+     length = FixedMul (distance,distscale[x1]);
+     angle = (viewangle + xtoviewangle[x1])>>ANGLETOFINESHIFT;
+-    ds_xfrac = viewx + FixedMul(finecosine[angle], length);
+-    ds_yfrac = -viewy - FixedMul(finesine[angle], length);
++    xfrac = viewx + FixedMul(finecosine[angle], length);
++    yfrac = -viewy - FixedMul(finesine[angle], length);
+ 
+     if (fixedcolormap)
+-	ds_colormap = fixedcolormap;
++	cmap = fixedcolormap;
+     else
+     {
+ 	index = distance >> LIGHTZSHIFT;
+@@ -159,9 +286,38 @@ R_MapPlane
+ 	if (index >= MAXLIGHTZ )
+ 	    index = MAXLIGHTZ-1;
+ 
+-	ds_colormap = planezlight[index];
++	cmap = planezlight[index];
+     }
+-	
++
++#ifdef R_DRAW_ASM_SPANLOW
++    // spanfunc is R_DrawSpanLow for every DETAIL=1 frame; hand it the six values directly.
++    if (spanfunc == R_DrawSpanLow)
++    {
++	unsigned position = ((xfrac << 10) & 0xffff0000) | ((yfrac >> 6) & 0x0000ffff);
++	unsigned step = ((xstep << 10) & 0xffff0000) | ((ystep >> 6) & 0x0000ffff);
++	int count = x2 - x1 + 1;
++	byte *dest = ylookup[y] + columnofs[x1 << 1];
++
++	// Full-width rows come from the pre-shaded flat (one LBU per view pixel); short rows
++	// are cheaper through the plain colormap loop than through a fresh 4 KiB fill.
++#if LF_SHADED_FLAT
++	if (count >= LF_FLAT_MIN_PIXELS)
++	{
++	    byte *shaded = R_ShadedFlat (ds_source, cmap);
++	    R_DrawSpanLowShadedFast (dest, count, position, step, shaded);
++	}
++	else
++#endif
++	    R_DrawSpanLowFast (dest, count, position, step, ds_source, cmap);
++	return;
++    }
++#endif
++
++    ds_xstep = xstep;
++    ds_ystep = ystep;
++    ds_xfrac = xfrac;
++    ds_yfrac = yfrac;
++    ds_colormap = cmap;
+     ds_y = y;
+     ds_x1 = x1;
+     ds_x2 = x2;
+@@ -320,7 +476,7 @@ R_CheckPlane
+ //
+ // R_MakeSpans
+ //
+-void
++static inline void
+ R_MakeSpans
+ ( int		x,
+   int		t1,
+@@ -389,14 +545,21 @@ void R_DrawPlanes (void)
+ 	// sky flat
+ 	if (pl->picnum == skyflatnum)
+ 	{
+-	    dc_iscale = pspriteiscale>>detailshift;
++	    fixed_t skyiscale = pspriteiscale>>detailshift;
++	    fixed_t skymid = skytexturemid;
++	    lighttable_t *skycmap = colormaps;
++#ifdef R_DRAW_ASM_COLLOW
++	    int plaincol = (colfunc == R_DrawColumnLow);
++#endif
++
++	    dc_iscale = skyiscale;
+ 	    
+ 	    // Sky is allways drawn full bright,
+ 	    //  i.e. colormaps[0] is used.
+ 	    // Because of this hack, sky is not affected
+ 	    //  by INVUL inverse mapping.
+-	    dc_colormap = colormaps;
+-	    dc_texturemid = skytexturemid;
++	    dc_colormap = skycmap;
++	    dc_texturemid = skymid;
+ 	    for (x=pl->minx ; x <= pl->maxx ; x++)
+ 	    {
+ 		dc_yl = pl->top[x];
+@@ -407,7 +570,16 @@ void R_DrawPlanes (void)
+ 		    angle = (viewangle + xtoviewangle[x])>>ANGLETOSKYSHIFT;
+ 		    dc_x = x;
+ 		    dc_source = R_GetColumn(skytexture, angle);
++#ifdef R_DRAW_ASM_COLLOW
++		    // Every sky column is a plain R_DrawColumnLow; skip the dc_* round trip.
++		    if (plaincol)
++			R_DrawColumnLowFast (x, dc_yl, dc_yh, skyiscale, skymid,
++					     dc_source, skycmap);
++		    else
++			colfunc ();
++#else
+ 		    colfunc ();
++#endif
+ 		}
+ 	    }
+ 	    continue;
+diff --git a/doomgeneric/r_plane.h b/doomgeneric/r_plane.h
+index 57b50e5..9f3f318 100644
+--- a/doomgeneric/r_plane.h
++++ b/doomgeneric/r_plane.h
+@@ -43,19 +43,11 @@ extern fixed_t		distscale[SCREENWIDTH];
+ void R_InitPlanes (void);
+ void R_ClearPlanes (void);
+ 
+-void
+-R_MapPlane
+-( int		y,
+-  int		x1,
+-  int		x2 );
+-
+-void
+-R_MakeSpans
+-( int		x,
+-  int		t1,
+-  int		b1,
+-  int		t2,
+-  int		b2 );
++// R_MapPlane is static inline in r_plane.c (R_MakeSpans is its only caller).
++
++// R_MakeSpans is inlined into R_DrawPlanes (its only caller): the function is called once per
++// view column per visplane and almost every call falls straight through its four while loops,
++// so the call and its five arguments were a large share of the plane bookkeeping.
+ 
+ void R_DrawPlanes (void);
+ 
+diff --git a/doomgeneric/r_segs.c b/doomgeneric/r_segs.c
+index 9b4e413..a4053a8 100644
+--- a/doomgeneric/r_segs.c
++++ b/doomgeneric/r_segs.c
+@@ -31,6 +31,8 @@
+ 
+ #include "r_local.h"
+ #include "r_sky.h"
++#include "w_wad.h"
++#include "z_zone.h"
+ 
+ 
+ // OPTIMIZE: closed two sided lines as single sided
+@@ -196,6 +198,51 @@ R_RenderMaskedSegRange
+ #define HEIGHTBITS		12
+ #define HEIGHTUNIT		(1<<HEIGHTBITS)
+ 
++#ifdef R_DRAW_ASM_COLLOW
++// Port change: every column of a segment reads the same texture, and almost always the same
++// patch lump, so resolve the column base once per texture and only re-resolve it when the
++// column's lump actually changes.  Same lookups as R_GetColumn (r_data.c), so the bytes are
++// identical; it just removes a call record and a W_CacheLumpNum hash lookup per pixel.
++typedef struct {
++    int			tex;
++    int			widthmask;
++    short		*lumps;
++    unsigned short	*ofs;
++    int			lump;
++    byte		*base;
++} lf_colcache_t;
++
++static inline void lf_colcache_init (lf_colcache_t *c, int tex)
++{
++    c->tex = tex;
++    c->widthmask = texturewidthmask[tex];
++    c->lumps = texturecolumnlump[tex];
++    c->ofs = texturecolumnofs[tex];
++    c->lump = -1;
++    c->base = R_GetCompositeBase (tex);
++}
++
++static inline byte *lf_column (lf_colcache_t *c, int col)
++{
++    int lump;
++
++    col &= c->widthmask;
++    lump = c->lumps[col];
++
++    if (lump != c->lump)
++    {
++	c->lump = lump;
++	c->base = lump > 0 ? (byte *) W_CacheLumpNum (lump, PU_CACHE)
++			   : R_GetCompositeBase (c->tex);
++    }
++
++    return c->base + c->ofs[col];
++}
++#define LF_GETCOL(cache, tex, col) lf_column (&cache, (col))
++#else
++#define LF_GETCOL(cache, tex, col) R_GetColumn (tex, (col))
++#endif
++
+ void R_RenderSegLoop (void)
+ {
+     angle_t		angle;
+@@ -207,64 +254,140 @@ void R_RenderSegLoop (void)
+     int			top;
+     int			bottom;
+ 
+-    for ( ; rw_x < rw_stopx ; rw_x++)
++    // Port change: every one of these values used to be a global, so the column loop reloaded
++    // it (auipc + addi + lw on this machine) several times per column, once per wall tier.
++    // They do not change during the loop, so copy them in once and give the compiler a chance
++    // to keep them in registers; the mutable ones are written back after the loop.
++    const int		markceil = markceiling;
++    const int		markflr = markfloor;
++    visplane_t		*ceilplane = ceilingplane;
++    visplane_t		*floorplane2 = floorplane;
++    const int		segtex = segtextured;
++    const int		midtex = midtexture;
++    const int		toptex = toptexture;
++    const int		bottex = bottomtexture;
++    const int		maskedtex = maskedtexture;
++    short		*mcol = maskedtexturecol;
++    const int		viewh = viewheight;
++    const fixed_t	midmid = rw_midtexturemid;
++    const fixed_t	topmid = rw_toptexturemid;
++    const fixed_t	botmid = rw_bottomtexturemid;
++    const fixed_t	roff = rw_offset;
++    const fixed_t	rdist = rw_distance;
++    const angle_t	cangle = rw_centerangle;
++    const angle_t	*xtoview = xtoviewangle;
++    const int		stop = rw_stopx;
++    const fixed_t	tstep = topstep;
++    const fixed_t	bstep = bottomstep;
++    const fixed_t	sstep = rw_scalestep;
++    const fixed_t	phighstep = pixhighstep;
++    const fixed_t	plowstep = pixlowstep;
++    int			x = rw_x;
++    fixed_t		tfrac = topfrac;
++    fixed_t		bfrac = bottomfrac;
++    fixed_t		scale = rw_scale;
++    fixed_t		phigh = pixhigh;
++    fixed_t		plow = pixlow;
++#ifdef R_DRAW_ASM_COLLOW
++    // dc_colormap/dc_iscale used to go out to globals and come back inside R_DrawColumnLow.
++    lighttable_t	*cmap = dc_colormap;
++    fixed_t		iscale = dc_iscale;
++    int			plaincol = (colfunc == R_DrawColumnLow);
++    lf_colcache_t	midcols, topcols, botcols;
++
++    if (midtex)
++	lf_colcache_init (&midcols, midtex);
++    if (toptex)
++	lf_colcache_init (&topcols, toptex);
++    if (bottex)
++	lf_colcache_init (&botcols, bottex);
++#define LF_DRAWCOL(src, midv, topy, boty)					\
++    do {									\
++	if (plaincol)								\
++	    R_DrawColumnLowFast (x, (topy), (boty), iscale, (midv),		\
++				 (src), cmap);					\
++	else									\
++	{									\
++	    dc_x = x;								\
++	    dc_yl = (topy); dc_yh = (boty); dc_texturemid = (midv);		\
++	    dc_source = (src);							\
++	    colfunc ();								\
++	}									\
++    } while (0)
++#else
++#define LF_DRAWCOL(src, midv, topy, boty)					\
++    do {									\
++	dc_x = x;								\
++	dc_yl = (topy); dc_yh = (boty); dc_texturemid = (midv);			\
++	dc_source = (src);							\
++	colfunc ();								\
++    } while (0)
++#endif
++
++    for ( ; x < stop ; x++)
+     {
+ 	// mark floor / ceiling areas
+-	yl = (topfrac+HEIGHTUNIT-1)>>HEIGHTBITS;
++	yl = (tfrac+HEIGHTUNIT-1)>>HEIGHTBITS;
+ 
+ 	// no space above wall?
+-	if (yl < ceilingclip[rw_x]+1)
+-	    yl = ceilingclip[rw_x]+1;
++	if (yl < ceilingclip[x]+1)
++	    yl = ceilingclip[x]+1;
+ 	
+-	if (markceiling)
++	if (markceil)
+ 	{
+-	    top = ceilingclip[rw_x]+1;
++	    top = ceilingclip[x]+1;
+ 	    bottom = yl-1;
+ 
+-	    if (bottom >= floorclip[rw_x])
+-		bottom = floorclip[rw_x]-1;
++	    if (bottom >= floorclip[x])
++		bottom = floorclip[x]-1;
+ 
+ 	    if (top <= bottom)
+ 	    {
+-		ceilingplane->top[rw_x] = top;
+-		ceilingplane->bottom[rw_x] = bottom;
++		ceilplane->top[x] = top;
++		ceilplane->bottom[x] = bottom;
+ 	    }
+ 	}
+ 		
+-	yh = bottomfrac>>HEIGHTBITS;
++	yh = bfrac>>HEIGHTBITS;
+ 
+-	if (yh >= floorclip[rw_x])
+-	    yh = floorclip[rw_x]-1;
++	if (yh >= floorclip[x])
++	    yh = floorclip[x]-1;
+ 
+-	if (markfloor)
++	if (markflr)
+ 	{
+ 	    top = yh+1;
+-	    bottom = floorclip[rw_x]-1;
+-	    if (top <= ceilingclip[rw_x])
+-		top = ceilingclip[rw_x]+1;
++	    bottom = floorclip[x]-1;
++	    if (top <= ceilingclip[x])
++		top = ceilingclip[x]+1;
+ 	    if (top <= bottom)
+ 	    {
+-		floorplane->top[rw_x] = top;
+-		floorplane->bottom[rw_x] = bottom;
++		floorplane2->top[x] = top;
++		floorplane2->bottom[x] = bottom;
+ 	    }
+ 	}
+ 	
+ 	// texturecolumn and lighting are independent of wall tiers
+-	if (segtextured)
++	if (segtex)
+ 	{
+ 	    // calculate texture offset
+-	    angle = (rw_centerangle + xtoviewangle[rw_x])>>ANGLETOFINESHIFT;
+-	    texturecolumn = rw_offset-FixedMul(finetangent[angle],rw_distance);
++	    angle = (cangle + xtoview[x])>>ANGLETOFINESHIFT;
++	    texturecolumn = roff-FixedMul(finetangent[angle],rdist);
+ 	    texturecolumn >>= FRACBITS;
+ 	    // calculate lighting
+-	    index = rw_scale>>LIGHTSCALESHIFT;
++	    index = scale>>LIGHTSCALESHIFT;
+ 
+ 	    if (index >=  MAXLIGHTSCALE )
+ 		index = MAXLIGHTSCALE-1;
+ 
++#ifdef R_DRAW_ASM_COLLOW
++	    cmap = walllights[index];
++	    iscale = 0xffffffffu / (unsigned)scale;
++	    dc_colormap = cmap;
++	    dc_iscale = iscale;
++#else
+ 	    dc_colormap = walllights[index];
+-	    dc_x = rw_x;
+-	    dc_iscale = 0xffffffffu / (unsigned)rw_scale;
++	    dc_iscale = 0xffffffffu / (unsigned)scale;
++#endif
+ 	}
+         else
+         {
+@@ -274,91 +397,86 @@ void R_RenderSegLoop (void)
+         }
+ 	
+ 	// draw the wall tiers
+-	if (midtexture)
++	if (midtex)
+ 	{
+ 	    // single sided line
+-	    dc_yl = yl;
+-	    dc_yh = yh;
+-	    dc_texturemid = rw_midtexturemid;
+-	    dc_source = R_GetColumn(midtexture,texturecolumn);
+-	    colfunc ();
+-	    ceilingclip[rw_x] = viewheight;
+-	    floorclip[rw_x] = -1;
++	    LF_DRAWCOL (LF_GETCOL(midcols, midtex, texturecolumn), midmid, yl, yh);
++	    ceilingclip[x] = viewh;
++	    floorclip[x] = -1;
+ 	}
+ 	else
+ 	{
+ 	    // two sided line
+-	    if (toptexture)
++	    if (toptex)
+ 	    {
+ 		// top wall
+-		mid = pixhigh>>HEIGHTBITS;
+-		pixhigh += pixhighstep;
++		mid = phigh>>HEIGHTBITS;
++		phigh += phighstep;
+ 
+-		if (mid >= floorclip[rw_x])
+-		    mid = floorclip[rw_x]-1;
++		if (mid >= floorclip[x])
++		    mid = floorclip[x]-1;
+ 
+ 		if (mid >= yl)
+ 		{
+-		    dc_yl = yl;
+-		    dc_yh = mid;
+-		    dc_texturemid = rw_toptexturemid;
+-		    dc_source = R_GetColumn(toptexture,texturecolumn);
+-		    colfunc ();
+-		    ceilingclip[rw_x] = mid;
++		    LF_DRAWCOL (LF_GETCOL(topcols, toptex, texturecolumn), topmid, yl, mid);
++		    ceilingclip[x] = mid;
+ 		}
+ 		else
+-		    ceilingclip[rw_x] = yl-1;
++		    ceilingclip[x] = yl-1;
+ 	    }
+ 	    else
+ 	    {
+ 		// no top wall
+-		if (markceiling)
+-		    ceilingclip[rw_x] = yl-1;
++		if (markceil)
++		    ceilingclip[x] = yl-1;
+ 	    }
+ 			
+-	    if (bottomtexture)
++	    if (bottex)
+ 	    {
+ 		// bottom wall
+-		mid = (pixlow+HEIGHTUNIT-1)>>HEIGHTBITS;
+-		pixlow += pixlowstep;
++		mid = (plow+HEIGHTUNIT-1)>>HEIGHTBITS;
++		plow += plowstep;
+ 
+ 		// no space above wall?
+-		if (mid <= ceilingclip[rw_x])
+-		    mid = ceilingclip[rw_x]+1;
++		if (mid <= ceilingclip[x])
++		    mid = ceilingclip[x]+1;
+ 		
+ 		if (mid <= yh)
+ 		{
+-		    dc_yl = mid;
+-		    dc_yh = yh;
+-		    dc_texturemid = rw_bottomtexturemid;
+-		    dc_source = R_GetColumn(bottomtexture,
+-					    texturecolumn);
+-		    colfunc ();
+-		    floorclip[rw_x] = mid;
++		    LF_DRAWCOL (LF_GETCOL(botcols, bottex, texturecolumn), botmid, mid, yh);
++		    floorclip[x] = mid;
+ 		}
+ 		else
+-		    floorclip[rw_x] = yh+1;
++		    floorclip[x] = yh+1;
+ 	    }
+ 	    else
+ 	    {
+ 		// no bottom wall
+-		if (markfloor)
+-		    floorclip[rw_x] = yh+1;
++		if (markflr)
++		    floorclip[x] = yh+1;
+ 	    }
+ 			
+-	    if (maskedtexture)
++	    if (maskedtex)
+ 	    {
+ 		// save texturecol
+ 		//  for backdrawing of masked mid texture
+-		maskedtexturecol[rw_x] = texturecolumn;
++		mcol[x] = texturecolumn;
+ 	    }
+ 	}
+ 		
+-	rw_scale += rw_scalestep;
+-	topfrac += topstep;
+-	bottomfrac += bottomstep;
++	scale += sstep;
++	tfrac += tstep;
++	bfrac += bstep;
+     }
++
++    rw_x = x;
++    rw_scale = scale;
++    topfrac = tfrac;
++    bottomfrac = bfrac;
++    pixhigh = phigh;
++    pixlow = plow;
+ }
++#undef LF_DRAWCOL
+ 
+ 
+ 
+diff --git a/doomgeneric/r_state.h b/doomgeneric/r_state.h
+index 2a60e2f..09e40a7 100644
+--- a/doomgeneric/r_state.h
++++ b/doomgeneric/r_state.h
+@@ -105,7 +105,7 @@ extern player_t*	viewplayer;
+ // ?
+ extern angle_t		clipangle;
+ 
+-extern int		viewangletox[FINEANGLES/2];
++extern short		viewangletox[FINEANGLES/2];
+ extern angle_t		xtoviewangle[SCREENWIDTH+1];
+ //extern fixed_t		finetangent[FINEANGLES/2];
+ 
 diff --git a/doomgeneric/r_things.c b/doomgeneric/r_things.c
-index 74e7369..b8d4f2e 100644
+index 74e7369..13df396 100644
 --- a/doomgeneric/r_things.c
 +++ b/doomgeneric/r_things.c
 @@ -178,6 +178,10 @@ void R_InitSpriteDefs (char** namelist)
@@ -287,8 +1431,7 @@ index 74e7369..b8d4f2e 100644
 -	for (l=start+1 ; l<end ; l++)
 +	spritename = DEH_String(namelist[i]);
 +	spritenamekey = (unsigned int) W_LumpNameKey(spritename);
- 	{
--	    if (!strncasecmp(lumpinfo[l].name, spritename, 4))
++	{
 +	unsigned char c0 = spritename[0];
 +	int b, lo, hi;
 +
@@ -303,7 +1446,8 @@ index 74e7369..b8d4f2e 100644
 +	    hi = end;
 +	}
 +	for (k=lo ; k<hi ; k++)
-+	{
+ 	{
+-	    if (!strncasecmp(lumpinfo[l].name, spritename, 4))
 +	    l = idx != NULL && b >= 0 ? idx[k] : k;
 +	    if ((unsigned int) W_LumpKeyOf(l) == spritenamekey)
  	    {
@@ -317,8 +1461,190 @@ index 74e7369..b8d4f2e 100644
  	
  	// check the frames that were found for completeness
  	if (maxframe == -1)
+@@ -371,7 +429,17 @@ void R_DrawMaskedColumn (column_t* column)
+ 
+ 	    // Drawn by either R_DrawColumn
+ 	    //  or (SHADOW) R_DrawFuzzColumn.
++#ifdef R_DRAW_ASM_COLLOW
++	    // A plain sprite column goes straight to the assembly loop with its arguments in
++	    // registers; fuzz/translated columns still need the dc_* globals.
++	    if (colfunc == R_DrawColumnLow)
++		R_DrawColumnLowFast (dc_x, dc_yl, dc_yh, dc_iscale, dc_texturemid,
++				     dc_source, dc_colormap);
++	    else
++		colfunc ();
++#else
+ 	    colfunc ();	
++#endif
+ 	}
+ 	column = (column_t *)(  (byte *)column + column->length + 4);
+     }
+@@ -501,6 +569,12 @@ void R_ProjectSprite (mobj_t* thing)
+ 		 thing->sprite);
+ #endif
+     sprdef = &sprites[thing->sprite];
++    // A sprite whose lumps port-lf/prune_wad.py dropped has no frames at all (PLAY: the player's
++    // own body, which the first-person camera never sees).  Treating it as empty is the same
++    // thing R_DrawVisSprite does with a missing frame; it must be checked before the range check
++    // below, which an empty sprite would trip whenever a thing of that type reaches here.
++    if (!sprdef->numframes)
++	return;
+ #ifdef RANGECHECK
+     if ( (thing->frame&FF_FRAMEMASK) >= sprdef->numframes )
+ 	I_Error ("R_ProjectSprite: invalid sprite frame %i : %i ",
+@@ -654,6 +728,8 @@ void R_DrawPSprite (pspdef_t* psp)
+ 		 psp->state->sprite);
+ #endif
+     sprdef = &sprites[psp->state->sprite];
++    if (!sprdef->numframes)  // a sprite prune_wad.py dropped: nothing to draw
++	return;
+ #ifdef RANGECHECK
+     if ( (psp->state->frame & FF_FRAMEMASK)  >= sprdef->numframes)
+ 	I_Error ("R_ProjectSprite: invalid sprite frame %i : %i ",
+diff --git a/doomgeneric/s_sound.c b/doomgeneric/s_sound.c
+index f6d8be1..e1c6f80 100644
+--- a/doomgeneric/s_sound.c
++++ b/doomgeneric/s_sound.c
+@@ -600,6 +600,14 @@ void S_StartMusic(int m_id)
+ 
+ void S_ChangeMusic(int musicnum, int looping)
+ {
++#ifdef LF_NO_MUSIC
++    // The LX machine has no sound device and the build passes -nosound, but P_SetupLevel still
++    // asks for the level's music and S_ChangeMusic would look up its lump. The music lumps are
++    // most of the WAD's audio data, and none of it can ever be played here.
++    (void) musicnum;
++    (void) looping;
++    return;
++#else
+     musicinfo_t *music = NULL;
+     char namebuf[9];
+     void *handle;
+@@ -644,6 +652,7 @@ void S_ChangeMusic(int musicnum, int looping)
+     I_PlaySong(handle, looping);
+ 
+     mus_playing = music;
++#endif  /* LF_NO_MUSIC */
+ }
+ 
+ boolean S_MusicPlaying(void)
+diff --git a/doomgeneric/st_stuff.c b/doomgeneric/st_stuff.c
+index e25accc..1d04e7e 100644
+--- a/doomgeneric/st_stuff.c
++++ b/doomgeneric/st_stuff.c
+@@ -261,7 +261,21 @@
+ 
+ // graphics are drawn to a backing screen and blitted to the real screen
+ byte                   *st_backing_screen;
+-	    
++
++#ifdef LF_NO_STBAR
++// The LX fullscreen build runs with screenblocks == 11, where the 320-pixel-wide status bar
++// cannot be blitted into the frame buffer (V_CopyRect copies 320-wide rows) and is never drawn.
++// Every entry point is a no-op, so the widget code below is unreachable: --gc-sections drops it,
++// and port-lf/prune_wad.py leaves the ST* graphics it would load out of the WAD -- 70 KiB of the
++// guest image, which is what the circuit's layer count scales with.
++void ST_Init (void) {}
++void ST_Start (void) {}
++void ST_Stop (void) {}
++void ST_Ticker (void) {}
++void ST_Drawer (boolean fullscreen, boolean refresh) { (void) fullscreen; (void) refresh; }
++boolean ST_Responder (event_t* ev) { (void) ev; return false; }
++#else
++
+ // main player in game
+ static player_t*	plyr; 
+ 
+@@ -1414,3 +1428,5 @@ void ST_Init (void)
+     st_backing_screen = (byte *) Z_Malloc(ST_WIDTH * ST_HEIGHT, PU_STATIC, 0);
+ }
+ 
++
++#endif  /* LF_NO_STBAR */
+diff --git a/doomgeneric/statdump.c b/doomgeneric/statdump.c
+index 7afe3f3..1032ef0 100644
+--- a/doomgeneric/statdump.c
++++ b/doomgeneric/statdump.c
+@@ -53,7 +53,9 @@ static const char *player_colors[] =
+ 
+ // Array of end-of-level statistics that have been captured.
+ 
+-#define MAX_CAPTURES 32
++// Port change: the -statdump history is for external tools; nothing in this guest reads it,
++// and 32 wbstartstruct_t is 6 KB of RAM.  Two slots keep the "did we capture anything" logic.
++#define MAX_CAPTURES 2
+ static wbstartstruct_t captured_stats[MAX_CAPTURES];
+ static int num_captured_stats = 0;
+ 
+diff --git a/doomgeneric/tables.c b/doomgeneric/tables.c
+index c221e9a..929a39f 100644
+--- a/doomgeneric/tables.c
++++ b/doomgeneric/tables.c
+@@ -37,29 +37,9 @@
+ // the y (<=x) is scaled and divided by x to get a tangent (slope) value
+ // which is looked up in the tantoangle[] table.  The +1 size is to handle
+ // the case when x==y without additional checking.
+-
+-int SlopeDiv(unsigned int num, unsigned int den)
+-{
+-    unsigned ans;
+-    
+-    if (den < 512)
+-    {
+-        return SLOPERANGE;
+-    }
+-    else
+-    {
+-        ans = (num << 3) / (den >> 8);
+-
+-        if (ans <= SLOPERANGE)
+-        {
+-            return ans;
+-        }
+-        else
+-        {
+-            return SLOPERANGE;
+-        }
+-    }
+-}
++//
++// Port change: SlopeDiv now lives in tables.h as a static inline (R_PointToAngle is its only
++// caller), so it is emitted into r_main.o instead of here.
+ 
+ const int finetangent[4096] =
+ {
+diff --git a/doomgeneric/tables.h b/doomgeneric/tables.h
+index 495fd53..7dda8df 100644
+--- a/doomgeneric/tables.h
++++ b/doomgeneric/tables.h
+@@ -89,7 +89,24 @@ extern const angle_t tantoangle[SLOPERANGE+1];
+ 
+ // Utility function,
+ //  called by R_PointToAngle.
+-int SlopeDiv(unsigned int num, unsigned int den);
++// Port change: static inline.  Its only caller is R_PointToAngle (r_main.c) and the call
++// record itself is a measurable part of the cost on a machine that pays per instruction;
++// the body is the same expression, so the result is identical.
++static inline int SlopeDiv(unsigned int num, unsigned int den)
++{
++    unsigned ans;
++
++    if (den < 512)
++    {
++        return SLOPERANGE;
++    }
++    else
++    {
++        ans = (num << 3) / (den >> 8);
++
++        return ans <= SLOPERANGE ? ans : SLOPERANGE;
++    }
++}
+ 
+ 
+ #endif
 diff --git a/doomgeneric/w_wad.c b/doomgeneric/w_wad.c
-index 1248046..16d111e 100644
+index 1248046..c211c2c 100644
 --- a/doomgeneric/w_wad.c
 +++ b/doomgeneric/w_wad.c
 @@ -64,9 +64,31 @@ unsigned int numlumps = 0;
@@ -366,7 +1692,57 @@ index 1248046..16d111e 100644
      }
  
      return result;
-@@ -246,6 +272,16 @@ int W_NumLumps (void)
+@@ -147,6 +173,7 @@ wad_file_t *W_AddFile (char *filename)
+     filelump_t *fileinfo;
+     filelump_t *filerover;
+     int newnumlumps;
++    boolean fileinfo_allocated = false;
+ 
+     // open the file and add to directory
+ 
+@@ -170,6 +197,7 @@ wad_file_t *W_AddFile (char *filename)
+         // here, as it would appear on disk.
+ 
+ 		fileinfo = Z_Malloc(sizeof(filelump_t), PU_STATIC, 0);
++		fileinfo_allocated = true;
+ 		fileinfo->filepos = LONG(0);
+ 		fileinfo->size = LONG(wad_file->length);
+ 
+@@ -199,9 +227,21 @@ wad_file_t *W_AddFile (char *filename)
+ 		header.numlumps = LONG(header.numlumps);
+ 		header.infotableofs = LONG(header.infotableofs);
+ 		length = header.numlumps*sizeof(filelump_t);
+-		fileinfo = Z_Malloc(length, PU_STATIC, 0);
+ 
+-        W_Read(wad_file, header.infotableofs, fileinfo, length);
++        // A memory-mapped WAD (port/w_file_qwenputer.c: the whole file already is in the
++        // guest image) needs no second copy of the directory; point at it instead. The
++        // directory of a well-formed WAD is 4-byte aligned, but check before trusting it.
++        if (wad_file->mapped != NULL
++            && ((size_t) (wad_file->mapped + header.infotableofs) & 3) == 0)
++        {
++            fileinfo = (filelump_t *) (wad_file->mapped + header.infotableofs);
++        }
++        else
++        {
++            fileinfo = Z_Malloc(length, PU_STATIC, 0);
++            W_Read(wad_file, header.infotableofs, fileinfo, length);
++            fileinfo_allocated = true;
++        }
+         newnumlumps += header.numlumps;
+     }
+ 
+@@ -225,7 +265,8 @@ wad_file_t *W_AddFile (char *filename)
+ 			++filerover;
+     }
+ 
+-    Z_Free(fileinfo);
++    if (fileinfo_allocated)
++        Z_Free(fileinfo);
+ 
+     if (lumphash != NULL)
+     {
+@@ -246,6 +287,16 @@ int W_NumLumps (void)
      return numlumps;
  }
  
@@ -383,7 +1759,7 @@ index 1248046..16d111e 100644
  
  
  //
-@@ -257,6 +293,7 @@ int W_CheckNumForName (char* name)
+@@ -257,6 +308,7 @@ int W_CheckNumForName (char* name)
  {
      lumpinfo_t *lump_p;
      int i;
@@ -391,7 +1767,7 @@ index 1248046..16d111e 100644
  
      // Do we have a hash table yet?
  
-@@ -267,10 +304,11 @@ int W_CheckNumForName (char* name)
+@@ -267,10 +319,11 @@ int W_CheckNumForName (char* name)
          // We do! Excellent.
  
          hash = W_LumpNameHash(name) % numlumps;
@@ -404,7 +1780,7 @@ index 1248046..16d111e 100644
              {
                  return lump_p - lumpinfo;
              }
-@@ -553,11 +591,17 @@ void W_GenerateHashTable(void)
+@@ -553,11 +606,17 @@ void W_GenerateHashTable(void)
          lumphash = Z_Malloc(sizeof(lumpinfo_t *) * numlumps, PU_STATIC, NULL);
          memset(lumphash, 0, sizeof(lumpinfo_t *) * numlumps);
  
@@ -437,4 +1813,81 @@ index 7189574..f006caf 100644
 +
  int	W_LumpLength (unsigned int lump);
  void    W_ReadLump (unsigned int lump, void *dest);
+ 
+diff --git a/doomgeneric/z_zone.c b/doomgeneric/z_zone.c
+index 16da22b..2e40c27 100644
+--- a/doomgeneric/z_zone.c
++++ b/doomgeneric/z_zone.c
+@@ -123,6 +123,51 @@ void Z_Init (void)
+ //
+ // Z_Free
+ //
++#ifdef LF_ZONE_STATS
++// Port instrumentation (-DLF_ZONE_STATS): the peak number of bytes the zone ever holds in
++// non-free blocks, split into the part that cannot be purged (PU_STATIC..PU_LEVEL) and the
++// purgable rest.  port-lf/build_fast.sh asks for this once to size QWEN_ZONE_BYTES.
++long lf_zone_peak;
++long lf_zone_peak_solid;
++long lf_zone_live_solid;
++long lf_zone_tag_live[PU_NUM_TAGS];
++long lf_zone_tag_peak[PU_NUM_TAGS];
++static void LF_ZoneNote (void)
++{
++    memblock_t*	b;
++    int		i;
++    long	used = 0;
++    long	solid = 0;
++
++    for (i = 0 ; i < PU_NUM_TAGS ; ++i)
++	lf_zone_tag_live[i] = 0;
++
++    for (b = mainzone->blocklist.next ; ; b = b->next)
++    {
++	if (b->tag != PU_FREE)
++	{
++	    used += b->size;
++	    if (b->tag < PU_PURGELEVEL)
++		solid += b->size;
++	    if (b->tag < PU_NUM_TAGS)
++		lf_zone_tag_live[b->tag] += b->size;
++	}
++	if (b->next == &mainzone->blocklist)
++	    break;
++    }
++    if (used > lf_zone_peak)
++	lf_zone_peak = used;
++    if (solid > lf_zone_peak_solid)
++	lf_zone_peak_solid = solid;
++    lf_zone_live_solid = solid;
++    for (i = 0 ; i < PU_NUM_TAGS ; ++i)
++	if (lf_zone_tag_live[i] > lf_zone_tag_peak[i])
++	    lf_zone_tag_peak[i] = lf_zone_tag_live[i];
++}
++#else
++#define LF_ZoneNote()
++#endif
++
+ void Z_Free (void* ptr)
+ {
+     memblock_t*		block;
+@@ -170,6 +215,7 @@ void Z_Free (void* ptr)
+         if (other == mainzone->rover)
+             mainzone->rover = block;
+     }
++    LF_ZoneNote ();
+ }
+ 
+ 
+@@ -285,7 +331,11 @@ Z_Malloc
+     mainzone->rover = base->next;	
+ 	
+     base->id = ZONEID;
+-    
++#ifdef LF_ZONE_WHO
++    if (size >= LF_ZONE_WHO)
++	printf ("ZMALLOC %d tag %d ra %p\n", size, tag, __builtin_return_address (0));
++#endif
++    LF_ZoneNote ();
+     return result;
+ }
  

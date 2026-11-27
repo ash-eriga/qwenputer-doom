@@ -7,6 +7,10 @@ _start:
     .option norelax
     la sp, __stack_top
     la tp, __tls_base
+    /* Anchor the small-data group: every global that fits in .sdata/.sbss is then reached with
+     * one lw/sw rd,off(gp) instead of auipc+addi+load (see the .sdata/.sbss block in
+     * doom-lf-fast.ld).  Must be computed before weak symbols are taken. */
+    la gp, __global_pointer$
     .option pop
     call main
     call exit
