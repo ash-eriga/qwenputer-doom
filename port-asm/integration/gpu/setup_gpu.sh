@@ -42,9 +42,11 @@ while [ $# -gt 0 ]; do
     shift
 done
 case $RES in
-    96)  ELF_NAME=asm-ray0-small.elf; PACKED_NAME=packed.pt ;;
-    192) ELF_NAME=asm-ray0-192.elf;   PACKED_NAME=packed-192.pt ;;
-    *) echo "unsupported RES=$RES (use 96 or 192)" >&2; exit 2 ;;
+    96)      ELF_NAME=asm-ray0-small.elf; PACKED_NAME=packed.pt;        EXTRA_CHECK=() ;;
+    192)     ELF_NAME=asm-ray0-192.elf;   PACKED_NAME=packed-192.pt;    EXTRA_CHECK=() ;;
+    doom160) ELF_NAME=doom-lf-fast.elf;   PACKED_NAME=packed-doom160.pt
+             EXTRA_CHECK=(--fb-w 160 --fb-h 100 --keys "" --pair-layers auto --png-scale 3) ;;
+    *) echo "unsupported RES=$RES (use 96, 192, or doom160)" >&2; exit 2 ;;
 esac
 mkdir -p "$WORK"
 say() { printf '\n== %s\n' "$*"; }
@@ -178,7 +180,7 @@ done
 if [ -f "$WORK/env.sh" ]; then . "$WORK/env.sh"; fi
 CMD=("$VENV/bin/python" port-asm/integration/gpu/mega_check.py --elf "$REPO/build/$ELF_NAME"
      --packed "$WORK/$PACKED_NAME" --wad "$WORK/playpal.wad"
-     --png-dir "$WORK/frames" --out "$WORK/mega-check.json")
+     --png-dir "$WORK/frames" --out "$WORK/mega-check.json" "${EXTRA_CHECK[@]}")
 if [ "$CHECK" = 1 ]; then
     say "validation: ${CMD[*]}"
     cd "$REPO"

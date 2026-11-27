@@ -134,7 +134,7 @@ class Elf32:
         text_end = int(self.symbols.get("TEXT_END", Symbol("TEXT_END", 0x40000, 0, 0, SHN_ABS)).value)
         ram_size = int(self.symbols.get("RAM_SIZE", Symbol("RAM_SIZE", 0x600000, 0, 0, SHN_ABS)).value)
         names = ("qwen_frame_count", "qwen_key_state", "qwen_demo_enabled",
-                 "DG_ScreenBuffer", "fb_cols", "fb_linear")
+                 "DG_ScreenBuffer", "I_VideoBuffer", "fb_cols", "fb_linear")
         syms = {}
         for name in names:
             if name in self.symbols:
@@ -146,9 +146,9 @@ class Elf32:
                     "size": s.size,
                 }
         missing = [n for n in ("qwen_frame_count", "qwen_key_state", "qwen_demo_enabled",
-                               "DG_ScreenBuffer", "fb_cols") if n not in syms]
+                               "DG_ScreenBuffer") if n not in syms]
         if missing:
-            raise KeyError(f"{self.path}: missing required ray0 symbols: {', '.join(missing)}")
+            raise KeyError(f"{self.path}: missing required symbols: {', '.join(missing)}")
         return {
             "elf": str(self.path),
             "elf_md5": self.md5(),
@@ -168,8 +168,13 @@ def infer_fb_geometry(elf: Elf32) -> dict:
     ray0.S lays out fb_cols (width*stride bytes), then fb_linear (width*height bytes), then
     qwen_frame_count.  The cost build never uses fb_linear, but its presence makes the two
     region sizes visible in the symbol table.  Among integer solutions, prefer the Doom-like
-    8:5 aspect and then minimal row padding.
+    8:5 aspect and then minimal row padding.  For DoomGeneric ELFs without fb_cols, fall back
+    to a linear row-major framebuffer (width/height overridable by the runner).
     """
+    if "fb_cols" not in elf.symbols or "fb_linear" not in elf.symbols:
+        return {"layout": "linear", "width": 160, "height": 100, "stride": 160,
+                "pitch_bytes": 16000, "linear_bytes": 16000,
+                "aspect_error": 0.0, "row_padding": 0}
     fc = elf.require("fb_cols").value
     fl = elf.require("fb_linear").value
     qf = elf.require("qwen_frame_count").value

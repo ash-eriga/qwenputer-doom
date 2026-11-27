@@ -70,12 +70,24 @@ class AsmColumnReadout:
         self.config = config
         fb = config["framebuffer"]
         self.width, self.height, self.stride = fb["width"], fb["height"], fb["stride"]
+        self.layout = fb.get("layout", "column")
         self.symbols = config["symbols"]
         self.palette = palette
-        self.follow_pointer = follow_pointer
+        self.follow_pointer = follow_pointer or (self.layout == "linear")
 
     @property
     def fb_offset(self) -> int:
+        if self.follow_pointer:
+            if "I_VideoBuffer" in self.symbols:
+                ptr_off = int(self.symbols["I_VideoBuffer"]["offset"])
+                addr = self._read_word(ptr_off)
+                if addr >= RAM_BASE:
+                    return addr - RAM_BASE
+            ptr_off = int(self.symbols["DG_ScreenBuffer"]["offset"])
+            addr = self._read_word(ptr_off)
+            if addr >= RAM_BASE:
+                return addr - RAM_BASE
+            return ptr_off
         return int(self.symbols["fb_cols"]["offset"])
 
     def _read_word(self, byte_offset: int) -> int:
@@ -83,17 +95,17 @@ class AsmColumnReadout:
         return struct.unpack("<I", raw)[0]
 
     def framebuffer_bytes(self) -> bytes:
-        """Raw column-major bytes, including row padding, straight from the model state."""
-        if self.follow_pointer:
-            ptr_off = int(self.symbols["DG_ScreenBuffer"]["offset"])
-            fb = self._read_word(ptr_off) - RAM_BASE
-        else:
-            fb = self.fb_offset
-        return self.readout.read_bytes(fb, self.width * self.stride)
+        """Raw framebuffer bytes straight from the model state."""
+        fb = self.fb_offset
+        nbytes = self.width * self.height if self.layout == "linear" else self.width * self.stride
+        return self.readout.read_bytes(fb, nbytes)
 
     def frame_indices(self) -> bytes:
-        """Row-major palette indexes; the transpose happens here, on the host."""
-        return column_major_to_rows(self.framebuffer_bytes(), self.width, self.height, self.stride)
+        """Row-major palette indexes; column-major transpose happens here, on the host."""
+        raw = self.framebuffer_bytes()
+        if self.layout == "linear":
+            return raw
+        return column_major_to_rows(raw, self.width, self.height, self.stride)
 
     def frame(self) -> bytes:
         """Row-major PPM bytes, API-compatible with doom-lx ``Readout.frame()``."""

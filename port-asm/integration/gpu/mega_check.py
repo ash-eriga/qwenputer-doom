@@ -292,8 +292,11 @@ def play(rt, mg, a) -> None:
     game = MegaGame(rt, sess, mg, check=True, palette=pal)
     keys = parse_keys(a.keys)
     typed = []
-    fb_off, len_fb = game.view.fb_offset, game.view.width * game.view.stride
+    len_fb = (game.view.width * game.view.height
+              if game.view.layout == "linear"
+              else game.view.width * game.view.stride)
     compared, differ = 0, []
+    last_ckpt = 0
     t0 = time.time()
     last_print = 0.0
     while game.tokens < a.tokens:
@@ -306,6 +309,7 @@ def play(rt, mg, a) -> None:
         if new and compared < a.compare_frames and game.shadow.ok:
             # the frame the model holds, read out of its state, against lx.ref's RAM
             game.sync()
+            fb_off = game.view.fb_offset
             want = bytes(game.shadow.m.ram[fb_off:fb_off + len_fb])
             got = game.view.framebuffer_bytes()
             compared += 1
@@ -316,6 +320,21 @@ def play(rt, mg, a) -> None:
             path = Path(a.png_dir) / f"frame-{game.frame:04d}.png"
             path.write_bytes(game.png(scale=a.png_scale))
             pngs.append(str(path))
+        if a.checkpoint and a.checkpoint_every > 0 and game.tokens - last_ckpt >= a.checkpoint_every:
+            import torch
+            game.sync()
+            ckpt = {
+                "tokens": game.tokens, "frame": game.frame,
+                "next_input": game.next_input, "last_input": game.last_input,
+                "conv_states": [t.cpu() if t is not None else None for t in sess.cache.conv_states],
+                "recurrent_states": [t.cpu() if t is not None else None for t in sess.cache.recurrent_states],
+            }
+            tmp = Path(f"{a.checkpoint}.tmp")
+            torch.save(ckpt, tmp)
+            tmp.replace(a.checkpoint)
+            last_ckpt = game.tokens
+            print(json.dumps({"checkpoint": str(a.checkpoint), "tokens": game.tokens,
+                              "frame": game.frame}), flush=True)
         if not game.shadow.ok:
             break
         if time.time() - last_print > 10:
@@ -351,7 +370,14 @@ def main(argv=None) -> int:
     ap.add_argument("--keys", default="2:1,4:5,6:0,8:128",
                     help="frame:byte,... typed once that frame is reached (bit 7: autopilot)")
     ap.add_argument("--no-spec", action="store_true", help="Mega(spec=False): no pairing")
+    ap.add_argument("--pair-layers", default=None,
+                    help="comma-separated GDN layer indices to pair with MLP (or 'auto')")
     ap.add_argument("--ncta", type=int, default=0)
+    ap.add_argument("--fb-w", type=int, default=0, help="override framebuffer width")
+    ap.add_argument("--fb-h", type=int, default=0, help="override framebuffer height")
+    ap.add_argument("--checkpoint", default=None, help="save periodic GPU cache checkpoints here")
+    ap.add_argument("--checkpoint-every", type=int, default=5_000_000,
+                    help="tokens between checkpoint saves (0 disables)")
     ap.add_argument("--compare-frames", type=int, default=50,
                     help="frames whose readout is compared with lx.ref's RAM (at a boundary)")
     ap.add_argument("--png-dir", default=None)
@@ -373,14 +399,24 @@ def main(argv=None) -> int:
         if not a.skip_math:
             check_math()
     rt = load_packed_runtime(a.elf, a.packed, a.lxsrc, device=a.device, compile_fast=False)
+    if a.fb_w > 0 and a.fb_h > 0:
+        rt.cfg["framebuffer"]["width"] = a.fb_w
+        rt.cfg["framebuffer"]["height"] = a.fb_h
+        if rt.cfg["framebuffer"].get("layout") == "linear":
+            rt.cfg["framebuffer"]["stride"] = a.fb_w
     rt.fast.dec = build_decode_plan(rt.fast, rt.model)
     t0 = time.time()
     if gpu:
         import mega
 
         probe = make_session(rt, 1)
+        kw = {}
+        if a.pair_layers == "auto":
+            kw["pair_layers"] = tuple(range(6, rt.fast.n_chip - 1, 2))
+        elif a.pair_layers is not None:
+            kw["pair_layers"] = tuple(int(x) for x in a.pair_layers.split(",") if x)
         mg = mega.Mega(rt.fast, rt.model, probe.cache, 0, ncta=a.ncta or None,
-                       spec=not a.no_spec)
+                       spec=not a.no_spec, **kw)
         report("build", True, build_s=round(time.time() - t0, 1),
                peak_gib=round(torch.cuda.max_memory_allocated() / 2**30, 2), **mg.stats)
         del probe
