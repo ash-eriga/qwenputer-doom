@@ -910,6 +910,7 @@ L_SW: {
         if (!LOAD_OK(ea, 4)) FAULT(5);
         memcpy(mem + ea, &v, 4);
         pc += 4;
+        steps++;
         if (ea == fc_addr && v != last_fc) {
             last_fc = v;
             if (frame_hook(v)) goto finish;

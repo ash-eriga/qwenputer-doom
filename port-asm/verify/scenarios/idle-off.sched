@@ -1,0 +1,3 @@
+# Host-input schedule used only to force qwen_demo_enabled=0 in the exact harness.
+# The event is beyond the short verification run, so qwen_key_state remains zero.
+999 0

@@ -20,7 +20,12 @@
 
 // ---------------------------------------------------------------- framebuffer
 
+#ifndef DG_NO_SCREEN_MALLOC
+// A second framebuffer to point DG_ScreenBuffer at. i_video.c replaces the pointer with the
+// engine's own render buffer before anything is drawn (DG_SCREEN_IS_VIDEOBUFFER), so builds that
+// cannot spare 4 bytes a pixel drop the array entirely with -DDG_NO_SCREEN_MALLOC.
 static pixel_t qwen_screen[DOOMGENERIC_RESX * DOOMGENERIC_RESY];
+#endif
 // DG_ScreenBuffer itself is defined by doomgeneric.c; DG_Init points it here.
 
 // Polled by the runner: number of frames the guest has rendered so far.
@@ -64,9 +69,11 @@ static void qwen_apply_schedule(void) {}
 
 void DG_Init(void)
 {
+#ifndef DG_NO_SCREEN_MALLOC
     DG_ScreenBuffer = qwen_screen;
+#endif
     printf("qwenputer-doom: framebuffer %dx%d at %p\n",
-           DOOMGENERIC_RESX, DOOMGENERIC_RESY, (void *)qwen_screen);
+           DOOMGENERIC_RESX, DOOMGENERIC_RESY, (void *)DG_ScreenBuffer);
 }
 
 // ---------------------------------------------------------------- clock
@@ -91,6 +98,18 @@ void DG_DrawFrame(void)
     qwen_frame_count++;
 #ifdef QWEN_SCHEDULE_TABLE
     qwen_apply_schedule();  // exactly the runner's poke point: the counter's store
+#endif
+#ifdef LF_ZONE_STATS
+    {
+        // port-lf/build_fast.sh -DLF_ZONE_STATS: how big QWEN_ZONE_BYTES must be.
+        extern long lf_zone_peak, lf_zone_peak_solid, lf_zone_live_solid;
+        extern long lf_zone_tag_peak[];
+        printf("ZONE peak %ld solid %ld livesolid %ld tags %ld %ld %ld %ld %ld %ld %ld %ld %ld\n",
+               lf_zone_peak, lf_zone_peak_solid, lf_zone_live_solid,
+               lf_zone_tag_peak[0], lf_zone_tag_peak[1], lf_zone_tag_peak[2],
+               lf_zone_tag_peak[3], lf_zone_tag_peak[4], lf_zone_tag_peak[5],
+               lf_zone_tag_peak[6], lf_zone_tag_peak[7], lf_zone_tag_peak[8]);
+    }
 #endif
     qwen_ticks_ms += 1000 / 35;
 }
